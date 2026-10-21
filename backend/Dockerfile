@@ -15,5 +15,5 @@ RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
 EXPOSE 3001
 # --import ensures OTel instrumentation loads BEFORE other modules,
-# so auto-instrumentation can patch Express, pg, http, etc.
+# so auto-instrumentation can patch Express, mysql2, http, etc.
 CMD ["node", "--import", "./dist/telemetry/instrumentation.js", "dist/index.js"]

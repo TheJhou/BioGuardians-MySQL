@@ -7,7 +7,7 @@ interface AppError extends Error {
   code?: string;
 }
 
-// Centralized error handler. Catches PG errors, validation errors,
+// Centralized error handler. Catches MySQL errors, validation errors,
 // and generic errors, returning a consistent JSON response.
 export function errorHandler(
   err: AppError,
@@ -29,20 +29,20 @@ export function errorHandler(
 
   errorCounter.add(1, { type: errorType, status: String(statusCode) });
 
-  // PostgreSQL error codes
-  if (err.code === '23505') {
+  // MySQL error codes (mysql2 expõe o nome simbólico em err.code)
+  if (err.code === 'ER_DUP_ENTRY') {
     res.status(409).json({ error: 'Duplicate entry', detail: err.message });
     return;
   }
-  if (err.code === '23503') {
+  if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.code === 'ER_ROW_IS_REFERENCED_2') {
     res.status(409).json({ error: 'Foreign key violation', detail: err.message });
     return;
   }
-  if (err.code === '23514') {
+  if (err.code === 'ER_CHECK_CONSTRAINT_VIOLATED') {
     res.status(400).json({ error: 'Check constraint violation', detail: err.message });
     return;
   }
-  if (err.code === '42P01' || err.code === '42703') {
+  if (err.code === 'ER_NO_SUCH_TABLE' || err.code === 'ER_BAD_FIELD_ERROR') {
     res.status(500).json({ error: 'Database schema error', detail: err.message });
     return;
   }

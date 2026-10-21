@@ -1,10 +1,10 @@
 # BioGuardians — Project Info
 
 > **Migração PostgreSQL → MySQL em andamento** (fork de `TheJhou/BioGuardians`).
-> Feito: schema (`db/`), `migrate.sh`, smoke test, compose (dev) e CI.
-> Falta: backend (driver + SQL das rotas), tiles MVT gerados no Node (o MySQL não tem
-> `ST_AsMVT`), scripts de `scripts/data/`, ML service (asyncpg) e deploy/VM.
-> Até lá, o backend, os loaders e o ML service ainda falam PostgreSQL e não rodam contra este banco.
+> Feito: schema (`db/`), `migrate.sh`, smoke test, compose (dev), CI e backend (driver
+> `mysql2`, SQL das rotas, tiles MVT gerados no Node).
+> Falta: scripts de `scripts/data/`, ML service (asyncpg) e deploy/VM.
+> Até lá, os loaders e o ML service ainda falam PostgreSQL e não rodam contra este banco.
 
 ## Stack
 - **Database**: MySQL 8.4 LTS (tipos espaciais nativos, SRID 4326)
@@ -93,9 +93,14 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 ## Backend
 - **API somente leitura: só rotas GET.** Não criar POST/PUT/DELETE; dados entram pelos scripts de `scripts/data/`, migrations e ML service. CORS aceita só `GET`
 - Rotas: `/api/health`, `/api/biomas|estados|categorias|taxonomia`, `/api/especies`, `/api/areas`, `/api/ocorrencias`, `/api/dashboard`, `/api/deteccoes` (lista completa no README)
-- SQL escrito direto nas rotas via `db/pool.ts` (sem ORM); pool `DB_POOL_MAX` (default 20)
-- Busca de espécies (`?busca=`) usa `unaccent(lower(...)) LIKE` em nome científico e popular
+- SQL escrito direto nas rotas via `db/pool.ts` (`mysql2`, sem ORM); pool `DB_POOL_MAX` (default 20). Placeholders `?` posicionais; arrays viram lista (`IN (?)` com `[1, 2]`)
+- O driver devolve DECIMAL/SUM/AVG como `number` (`decimalNumbers`), DATE como `'YYYY-MM-DD'` e DATETIME em UTC; colunas JSON e `ST_AsGeoJSON` já chegam como objeto
+- Busca de espécies (`?busca=`) e de UCs: `col COLLATE utf8mb4_0900_ai_ci LIKE ?` (sem acento e sem caixa: "onca" acha "Onça")
+- MySQL não tem `NULLS LAST`: `ORDER BY col IS NULL, col` (em `DESC` o NULL já vai para o fim)
 - Tiles MVT: `/api/areas/tiles/:z/:x/:y.mvt` (tabela `area_tile` sem filtros; LRU 1h com filtros) e `/api/ocorrencias/tiles/:z/:x/:y.mvt` (LRU 1h + warm-up de z3–z5 no boot, desligável com `TILE_WARMUP=false`)
+- O MySQL não tem `ST_AsMVT`: o banco só filtra pelo índice espacial (`MBRIntersects` com o envelope do tile, a partir do z3) e devolve GeoJSON; recorte, projeção e codificação ficam em `src/mvt.ts` (`geojson-vt` + `vt-pbf`). Camadas `uc` (`id`, `categoria_uc`) e `ocorrencia` (`id`, `especie_id`, `categoria_ameaca`)
+- Simplificação de UCs: `SIMPLIFIED_GEOM_SQL` em `tileStore.ts`. O `ST_Simplify` do MySQL só aceita SRID 0 (`ST_SRID(geom, 0)`) e devolve `NULL` quando o polígono inteiro é menor que a tolerância, por isso o fallback em cadeia (sem ele as UCs pequenas somem nos zooms baixos)
+- Envelope/bbox em WKT sempre com `ST_GeomFromText(?, 4326, 'axis-order=long-lat')` (`ENVELOPE_SQL`); para pontos, o recorte exato é `BETWEEN` em `lat`/`lon`
 - Proxy ML (somente leitura): `GET /api/deteccoes/jobs`, `GET /api/deteccoes/jobs/:id` → `ML_SERVICE_URL` (default `http://localhost:8001`); só funciona com o ML service rodando
 - Cache LRU em memória (`CACHE_TTL_MS`, `CACHE_MAX`) com TTL por rota; sem invalidação ativa (a API não escreve)
 - OpenTelemetry condicional (só ativa com `OTEL_EXPORTER_OTLP_ENDPOINT`)
@@ -309,7 +314,7 @@ Na VM, o `stack.yml` já inclui a stack de observabilidade.
 - Loki: http://localhost:3100/ready
 
 ### Instrumentação
-- **Auto-instrumentação**: `@opentelemetry/auto-instrumentations-node` instrumenta Express, pg, http automaticamente
+- **Auto-instrumentação**: `@opentelemetry/auto-instrumentations-node` instrumenta Express, mysql2, http automaticamente. A instrumentação do mysql2 só gera spans: o histograma `db.client.operation.duration` é gravado à mão em `db/pool.ts`, e as métricas de pool (`db_client_connection_*`) não existem mais (o mysql2 não as expõe)
 - **Condicional**: só ativa se `OTEL_EXPORTER_OTLP_ENDPOINT` estiver definida (no-op sem overlay)
 - **gRPC**: traces + metrics via gRPC (:4317); logs via HTTP (:4318)
 - **Filtros**: `/api/health` não gera spans (ruído)
@@ -318,7 +323,6 @@ Na VM, o `stack.yml` já inclui a stack de observabilidade.
 ### Métricas disponíveis
 - `http_server_request_duration_seconds` (histogram) — latência por rota
 - `db_client_operation_duration_seconds` (histogram) — duração das queries
-- `db_client_connections_usage` (gauge) — pool active/idle
 - `bioguardians_cache_hits_total` / `bioguardians_cache_misses_total` (counter) — cache hit rate
 - `bioguardians_errors_total` (counter) — erros por tipo/status
 

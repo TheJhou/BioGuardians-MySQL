@@ -3,7 +3,9 @@ import { query } from '../db/pool.js';
 import { validateId } from '../middleware/validateId.js';
 import { cacheMiddleware, getTileCache, setTileCache } from '../cache/cache.js';
 import { parseParam, getParam } from '../utils/params.js';
-import { getStoredAreaTile, storeAreaTile, AREA_SIMPLIFY_SQL } from '../tileStore.js';
+import { getStoredAreaTile, storeAreaTile, generateAreaTile, SIMPLIFIED_GEOM_SQL } from '../tileStore.js';
+import { ENVELOPE_SQL, envelopeWkt } from '../mvt.js';
+import { parseBbox } from '../utils/bbox.js';
 
 const router = Router();
 
@@ -20,7 +22,7 @@ function sendTile(res: any, buffer: Buffer): void {
   res.send(buffer);
 }
 
-// GET /api/areas � returns GeoJSON FeatureCollection, cached 30s
+// GET /api/areas — returns GeoJSON FeatureCollection, cached 30s
 // Supports bbox (minLng,minLat,maxLng,maxLat) and zoom for geometry simplification.
 router.get('/', cacheMiddleware(undefined, () => 30_000), async (req, res, next) => {
   try {
@@ -28,63 +30,58 @@ router.get('/', cacheMiddleware(undefined, () => 30_000), async (req, res, next)
 
     const conditions: string[] = [];
     const params: unknown[] = [];
-    let idx = 1;
 
-    if (bioma) { conditions.push(`a.bioma_id = $${idx++}`); params.push(parseParam(bioma)); }
-    if (esfera) { conditions.push(`a.esfera = $${idx++}`); params.push(esfera); }
-    if (categoria) { conditions.push(`a.categoria_uc = $${idx++}`); params.push(categoria); }
+    // Tolerância de simplificação por zoom (graus).
+    const zoomLevel = zoom ? parseInt(String(zoom), 10) : 10;
+    const tolerance = zoomLevel > 12 ? 0.001 : zoomLevel > 8 ? 0.01 : 0.1;
+    params.push(tolerance, tolerance);
+
+    if (bioma) { conditions.push('a.bioma_id = ?'); params.push(parseParam(bioma)); }
+    if (esfera) { conditions.push('a.esfera = ?'); params.push(esfera); }
+    if (categoria) { conditions.push('a.categoria_uc = ?'); params.push(categoria); }
     if (busca && typeof busca === 'string') {
-      // Um único parâmetro reaproveitado nas três colunas; esfera é enum (cast p/ texto).
-      conditions.push(`(a.nome ILIKE $${idx} OR a.esfera::text ILIKE $${idx} OR b.nome ILIKE $${idx})`);
-      params.push(`%${busca}%`);
-      idx++;
+      // Sem acento e sem caixa (equivale ao ILIKE + unaccent do PostgreSQL).
+      conditions.push(`(a.nome COLLATE utf8mb4_0900_ai_ci LIKE ?
+        OR a.esfera COLLATE utf8mb4_0900_ai_ci LIKE ?
+        OR b.nome COLLATE utf8mb4_0900_ai_ci LIKE ?)`);
+      params.push(`%${busca}%`, `%${busca}%`, `%${busca}%`);
     }
 
     // Bounding box filter: only return areas intersecting the visible map region
-    if (bbox) {
-      const parts = String(bbox).split(',').map(Number);
-      if (parts.length === 4 && parts.every(n => !isNaN(n))) {
-        conditions.push(`a.geom && ST_MakeEnvelope($${idx}, $${idx + 1}, $${idx + 2}, $${idx + 3}, 4326)`);
-        params.push(parts[0], parts[1], parts[2], parts[3]);
-        idx += 4;
-      }
+    const bounds = parseBbox(bbox);
+    if (bounds) {
+      conditions.push(`MBRIntersects(a.geom, ${ENVELOPE_SQL})`);
+      params.push(envelopeWkt(bounds));
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limitClause = `LIMIT 500`;
 
-    // Toler�ncia de simplifica��o por zoom (graus).
-    const zoomLevel = zoom ? parseInt(String(zoom), 10) : 10;
-    const tolerance = zoomLevel > 12 ? 0.001 : zoomLevel > 8 ? 0.01 : 0.1;
-
-    // Uma �nica query: metadados + geometria simplificada. Evita abrir
-    // N conex�es do pool com chunks paralelos.
-    const { rows: features } = await query(
-      `SELECT a.id AS feature_id,
-              ST_AsGeoJSON(ST_SimplifyPreserveTopology(a.geom, $${idx}), 5)::json AS geometry,
-              json_build_object(
-                'id', a.id,
-                'nome', a.nome,
-                'categoria_uc', a.categoria_uc,
-                'esfera', a.esfera,
-                'bioma_id', a.bioma_id,
-                'area_ha', a.area_ha
-              ) AS properties
+    // Uma única query: metadados + geometria simplificada (ver SIMPLIFIED_GEOM_SQL).
+    const { rows } = await query(
+      `SELECT a.id, a.nome, a.categoria_uc, a.esfera, a.bioma_id, a.area_ha,
+              ST_AsGeoJSON(${SIMPLIFIED_GEOM_SQL}, 5) AS geometry
        FROM area_protegida a
        LEFT JOIN bioma b ON b.id = a.bioma_id
        ${where}
        ORDER BY a.id
-       ${limitClause}`,
-      [...params, tolerance]
+       LIMIT 500`,
+      params
     );
 
     res.json({
       type: 'FeatureCollection',
-      features: features.map((r: any) => ({
+      features: rows.map((r: any) => ({
         type: 'Feature',
-        id: r.feature_id,
+        id: r.id,
         geometry: r.geometry,
-        properties: r.properties,
+        properties: {
+          id: r.id,
+          nome: r.nome,
+          categoria_uc: r.categoria_uc,
+          esfera: r.esfera,
+          bioma_id: r.bioma_id,
+          area_ha: r.area_ha,
+        },
       })),
     });
   } catch (err) { next(err); }
@@ -101,21 +98,19 @@ router.get('/tiles/:z/:x/:y.mvt', async (req, res, next) => {
       return;
     }
 
-    const { esfera, categoria, bioma } = req.query;
-    const hasFilters = Boolean(esfera || categoria || bioma);
+    const esfera = getParam(req.query.esfera);
+    const categoria = getParam(req.query.categoria);
+    const bioma = parseParam(req.query.bioma);
+    const hasFilters = Boolean(esfera || categoria || bioma !== undefined);
 
     // Cache persistente: tiles pré-gerados cobrem o dataset completo.
     // Requests com filtro não usam a tabela (cada filtro geraria uma
-    // variante do tile) — seguem o LRU em memória como antes.
+    // variante do tile) — ficam só no LRU em memória.
     if (!hasFilters) {
-      try {
-        const stored = await getStoredAreaTile(z, x, y);
-        if (stored) {
-          sendTile(res, stored);
-          return;
-        }
-      } catch {
-        // Tabela ainda não migrada — cai no caminho normal.
+      const stored = await getStoredAreaTile(z, x, y);
+      if (stored) {
+        sendTile(res, stored);
+        return;
       }
     }
 
@@ -126,31 +121,7 @@ router.get('/tiles/:z/:x/:y.mvt', async (req, res, next) => {
       return;
     }
 
-    const conditions: string[] = ['a.geom && ST_Transform(bounds.b, 4326)'];
-    const params: unknown[] = [z, x, y];
-    let idx = 4;
-
-    if (esfera) { conditions.push(`a.esfera = $${idx++}`); params.push(esfera); }
-    if (categoria) { conditions.push(`a.categoria_uc = $${idx++}`); params.push(categoria); }
-    if (bioma) { conditions.push(`a.bioma_id = $${idx++}`); params.push(parseParam(bioma)); }
-
-    const where = conditions.join(' AND ');
-
-    const { rows } = await query(
-      `SELECT COALESCE(encode(ST_AsMVT(mvt, 'uc', 4096, 'geom'), 'base64'), '') AS mvt
-       FROM (
-         SELECT
-           ST_AsMVTGeom(${AREA_SIMPLIFY_SQL}, bounds.b, 4096, 256, true) AS geom,
-           a.id,
-           a.categoria_uc::text
-         FROM area_protegida a
-         CROSS JOIN (SELECT ST_TileEnvelope($1::int, $2::int, $3::int) AS b) bounds
-         WHERE ${where}
-       ) mvt`,
-      params
-    );
-
-    const buffer = rows[0].mvt ? Buffer.from(rows[0].mvt, 'base64') : Buffer.alloc(0);
+    const buffer = await generateAreaTile(z, x, y, { esfera, categoria, bioma });
     if (!hasFilters) {
       try {
         await storeAreaTile(z, x, y, buffer);
@@ -163,27 +134,15 @@ router.get('/tiles/:z/:x/:y.mvt', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/areas/:id � single area as GeoJSON Feature
+// GET /api/areas/:id — single area as GeoJSON Feature
 router.get('/:id', validateId, async (req, res, next) => {
   try {
     const id = parseParam(req.params.id)!;
     const { rows } = await query(
-      `SELECT json_build_object(
-         'type', 'Feature',
-         'id', a.id,
-         'geometry', ST_AsGeoJSON(a.geom)::json,
-         'properties', json_build_object(
-           'id', a.id,
-           'nome', a.nome,
-           'categoria_uc', a.categoria_uc,
-           'esfera', a.esfera,
-           'bioma_id', a.bioma_id,
-           'area_ha', a.area_ha,
-           'criado_em', a.criado_em,
-           'atualizado_em', a.atualizado_em
-         )
-       ) AS geojson
-       FROM area_protegida a WHERE a.id = $1`,
+      `SELECT a.id, a.nome, a.categoria_uc, a.esfera, a.bioma_id, a.area_ha,
+              a.criado_em, a.atualizado_em,
+              ST_AsGeoJSON(a.geom) AS geometry
+       FROM area_protegida a WHERE a.id = ?`,
       [id]
     );
 
@@ -192,7 +151,8 @@ router.get('/:id', validateId, async (req, res, next) => {
       return;
     }
 
-    res.json(rows[0].geojson);
+    const { geometry, ...properties } = rows[0];
+    res.json({ type: 'Feature', id: properties.id, geometry, properties });
   } catch (err) { next(err); }
 });
 
@@ -202,11 +162,11 @@ router.get('/:id/info', validateId, async (req, res, next) => {
   try {
     const id = parseParam(req.params.id)!;
     const { rows } = await query(
-      `SELECT a.id, a.nome, a.categoria_uc::text, a.esfera::text,
-              a.bioma_id, b.nome AS bioma, a.area_ha::float
+      `SELECT a.id, a.nome, a.categoria_uc, a.esfera,
+              a.bioma_id, b.nome AS bioma, a.area_ha
        FROM area_protegida a
        LEFT JOIN bioma b ON b.id = a.bioma_id
-       WHERE a.id = $1`,
+       WHERE a.id = ?`,
       [id]
     );
 
@@ -219,11 +179,21 @@ router.get('/:id/info', validateId, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/areas/:id/especies � spatial query: species inside this area
+// GET /api/areas/:id/especies — espécies ameaçadas (CR/EN/VU) com ocorrência
+// dentro da UC, pela junção pré-calculada ocorrencia_area.
 router.get('/:id/especies', validateId, async (req, res, next) => {
   try {
     const id = parseParam(req.params.id)!;
-    const { rows } = await query('SELECT * FROM especies_em_area($1)', [id]);
+    const { rows } = await query(
+      `SELECT DISTINCT e.id AS especie_id, e.nome_cientifico, e.nome_popular,
+              e.categoria_ameaca AS categoria
+       FROM ocorrencia_area oa
+       JOIN ocorrencia o ON o.id = oa.ocorrencia_id
+       JOIN especie    e ON e.id = o.especie_id
+       WHERE oa.area_id = ?
+         AND e.categoria_ameaca IN ('CR','EN','VU')`,
+      [id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 });
