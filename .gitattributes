@@ -1,3 +1,6 @@
 # Scripts de shell rodam em Linux (containers, CI, VM): sempre LF,
 # mesmo com core.autocrlf=true no Windows.
 *.sh text eol=lf
+# O migrate.sh guarda o SHA-256 de cada migration: com CRLF no Windows o
+# checksum muda e o runner acusa "modified after being applied".
+*.sql text eol=lf
