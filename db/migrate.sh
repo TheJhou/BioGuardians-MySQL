@@ -1,10 +1,16 @@
 #!/bin/bash
 # ============================================================
-# BioGuardians - Database Migration Runner
+# BioGuardians - Database Migration Runner (MySQL 8.4)
 #
 # Applies SQL migrations from db/migrations/ in order.
 # Tracks applied migrations in a journal table with SHA-256
 # checksums to detect tampering with already-applied files.
+#
+# MySQL commits DDL implicitly, so a migration cannot share a
+# transaction with its journal entry: the entry is written only
+# after the file ran without errors. Every migration must be
+# idempotent, so a migration that failed halfway can simply be
+# run again.
 #
 # Usage:
 #   ./db/migrate.sh                 # apply pending migrations
@@ -12,10 +18,10 @@
 #   ./db/migrate.sh --dry-run       # show what would be applied
 #
 # Environment:
-#   DATABASE_URL (preferred; psql connection string)
+#   DATABASE_URL (preferred; mysql://user:password@host:port/database)
 #   Or, if DATABASE_URL is not set:
-#     DB_HOST     (default: localhost)
-#     DB_PORT     (default: 5432)
+#     DB_HOST     (default: 127.0.0.1)
+#     DB_PORT     (default: 3306)
 #     DB_USER     (required)
 #     DB_PASSWORD (required)
 #     DB_NAME     (required)
@@ -27,32 +33,51 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-$SCRIPT_DIR/migrations}"
 
-if [ -n "${DATABASE_URL:-}" ]; then
-  PSQL_BASE="psql -v ON_ERROR_STOP=1 $DATABASE_URL"
-  CONN_LABEL="$DATABASE_URL"
-else
-  DB_HOST="${DB_HOST:-localhost}"
-  DB_PORT="${DB_PORT:-5432}"
+die()   { echo "ERROR: $*" >&2; exit 1; }
 
+if [ -n "${DATABASE_URL:-}" ]; then
+  # mysql://user:password@host[:port]/database[?params]
+  re='^mysql://([^:@/]+):([^@]*)@([^:/]+)(:([0-9]+))?/([^?]+)'
+  [[ "$DATABASE_URL" =~ $re ]] || die "DATABASE_URL must look like mysql://user:password@host:port/database"
+  DB_USER="${BASH_REMATCH[1]}"
+  DB_PASSWORD="${BASH_REMATCH[2]}"
+  DB_HOST="${BASH_REMATCH[3]}"
+  DB_PORT="${BASH_REMATCH[5]:-3306}"
+  DB_NAME="${BASH_REMATCH[6]}"
+else
+  DB_HOST="${DB_HOST:-127.0.0.1}"
+  DB_PORT="${DB_PORT:-3306}"
   : "${DB_USER:?DB_USER is required (set in .env or environment)}"
   : "${DB_PASSWORD:?DB_PASSWORD is required (set in .env or environment)}"
   : "${DB_NAME:?DB_NAME is required (set in .env or environment)}"
-
-  export PGPASSWORD="$DB_PASSWORD"
-  PSQL_BASE="psql -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME""
-  CONN_LABEL="$DB_HOST:$DB_PORT"
 fi
+CONN_LABEL="$DB_HOST:$DB_PORT/$DB_NAME"
+
+# Credentials go through a private options file, not the command line.
+MY_CNF="$(mktemp)"
+trap 'rm -f "$MY_CNF"' EXIT
+chmod 600 "$MY_CNF"
+cat > "$MY_CNF" <<EOF
+[client]
+host=$DB_HOST
+port=$DB_PORT
+user=$DB_USER
+password="$DB_PASSWORD"
+default-character-set=utf8mb4
+EOF
+
+# utf8mb4 is required: the client defaults to latin1, which corrupts accents.
+MYSQL_BASE="mysql --defaults-extra-file=$MY_CNF --protocol=TCP $DB_NAME"
 
 # ---------- Helpers ----------
 log()   { echo "   $*"; }
 header(){ echo "==> $*"; }
-die()   { echo "ERROR: $*" >&2; exit 1; }
 
 # Wait for database to be ready
 wait_for_db() {
     header "Waiting for database at $CONN_LABEL..."
     for i in $(seq 1 30); do
-        if $PSQL_BASE -t -A -c "SELECT 1" >/dev/null 2>&1; then
+        if $MYSQL_BASE -N -e "SELECT 1" >/dev/null 2>&1; then
             log "Database is ready."
             return 0
         fi
@@ -65,20 +90,20 @@ wait_for_db() {
 # Ensure journal table exists
 ensure_journal() {
     header "Ensuring migration journal exists..."
-    $PSQL_BASE <<'SQL'
+    $MYSQL_BASE <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
-    id           SERIAL       PRIMARY KEY,
-    filename     VARCHAR(255) NOT NULL UNIQUE,
-    checksum     VARCHAR(64)  NOT NULL,
-    applied_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+    id         INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    filename   VARCHAR(255) NOT NULL UNIQUE,
+    checksum   VARCHAR(64)  NOT NULL,
+    applied_at DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 );
 SQL
 }
 
 # Get applied migrations as "filename|checksum" lines
 get_applied() {
-    $PSQL_BASE -t -A -F'|' -c \
-        "SELECT filename, checksum FROM schema_migrations ORDER BY filename;"
+    $MYSQL_BASE -N -B -e \
+        "SELECT CONCAT(filename, '|', checksum) FROM schema_migrations ORDER BY filename;"
 }
 
 # Compute SHA-256 hash of a file
@@ -98,7 +123,7 @@ cmd_status() {
     local total=0 pending=0 skipped=0
 
     for f in $(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null | sort); do
-        local filename basename_fn hash existing existing_hash
+        local filename hash existing existing_hash
         filename=$(basename "$f")
         hash=$(file_hash "$f")
         total=$((total + 1))
@@ -162,31 +187,10 @@ cmd_migrate() {
         fi
 
         log "APPLY   $filename"
-
-        # Check if migration requests no transaction (e.g. ALTER SYSTEM).
-        # Migrations starting with "-- @no-transaction" run without BEGIN/COMMIT.
-        local use_transaction=true
-        if head -1 "$f" | grep -q '@no-transaction'; then
-            use_transaction=false
-        fi
-
-        if $use_transaction; then
-            # Apply migration + record journal entry in a single transaction.
-            # If the SQL fails, the transaction rolls back and the journal
-            # entry is NOT recorded, so the migration can be retried.
-            $PSQL_BASE <<EOF
-BEGIN;
-\i $f
-INSERT INTO schema_migrations (filename, checksum)
-VALUES ('$filename', '$hash');
-COMMIT;
-EOF
-        else
-            # Run without transaction (required for ALTER SYSTEM, REFRESH
-            # CONCURRENTLY, etc). Journal entry is recorded separately.
-            $PSQL_BASE -v ON_ERROR_STOP=1 -f "$f"
-            $PSQL_BASE -c "INSERT INTO schema_migrations (filename, checksum) VALUES ('$filename', '$hash');"
-        fi
+        # The mysql client stops at the first error (no --force), so the
+        # journal entry below is only written when the whole file succeeded.
+        $MYSQL_BASE < "$f"
+        $MYSQL_BASE -e "INSERT INTO schema_migrations (filename, checksum) VALUES ('$filename', '$hash');"
         applied_count=$((applied_count + 1))
     done
 

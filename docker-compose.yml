@@ -1,30 +1,33 @@
 services:
-  # ---------- Database (PostgreSQL + PostGIS) ----------
+  # ---------- Database (MySQL 8.4 LTS) ----------
   db:
-    image: postgis/postgis:16-3.4
+    image: mysql:8.4
     container_name: bioguardians-db
     restart: unless-stopped
-    shm_size: 4gb
+    # log-bin-trust-function-creators: lets the app user create triggers
+    # while binary logging is on (it is on by default in 8.4).
     command: >
-      postgres
-      -c shared_buffers=2GB
-      -c effective_cache_size=4GB
-      -c work_mem=64MB
-      -c maintenance_work_mem=512MB
-      -c max_connections=100
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_0900_as_cs
+      --default-time-zone=+00:00
+      --innodb-buffer-pool-size=2G
+      --max-connections=100
+      --log-bin-trust-function-creators=1
     environment:
-      POSTGRES_USER: ${DB_USER:?DB_USER is required, copy .env.example to .env}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required, copy .env.example to .env}
-      POSTGRES_DB: ${DB_NAME:?DB_NAME is required, copy .env.example to .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required, copy .env.example to .env}
+      MYSQL_USER: ${DB_USER:?DB_USER is required, copy .env.example to .env}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required, copy .env.example to .env}
+      MYSQL_DATABASE: ${DB_NAME:?DB_NAME is required, copy .env.example to .env}
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "${DB_PORT:-3306}:3306"
     volumes:
-      - bioguardians_pgdata:/var/lib/postgresql/data
+      - bioguardians_mysqldata:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" --silent"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -33,14 +36,14 @@ services:
 
   # ---------- Migration runner (one-shot) ----------
   migrate:
-    image: postgres:16-alpine
+    image: mysql:8.4
     container_name: bioguardians-migrate
     depends_on:
       db:
         condition: service_healthy
     environment:
       DB_HOST: db
-      DB_PORT: 5432
+      DB_PORT: 3306
       DB_USER: ${DB_USER:?DB_USER is required}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       DB_NAME: ${DB_NAME:?DB_NAME is required}
@@ -60,7 +63,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
       PORT: 3001
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
@@ -119,7 +122,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4}
       LOCAL_VLM_ENABLED: ${LOCAL_VLM_ENABLED:-true}
@@ -153,5 +156,5 @@ services:
               capabilities: [gpu]
 
 volumes:
-  bioguardians_pgdata:
+  bioguardians_mysqldata:
   bioguardians_ml_images:
