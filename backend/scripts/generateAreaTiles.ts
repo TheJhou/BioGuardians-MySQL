@@ -1,5 +1,5 @@
-// Pré-gera os tiles MVT de áreas protegidas direto no Postgres
-// (tabela area_tile, migration 004). Uso:
+// Pré-gera os tiles MVT de áreas protegidas e grava no banco
+// (tabela area_tile). Uso:
 //
 //   npm run generate-area-tiles            → z3–z6 (default)
 //   npm run generate-area-tiles -- 3 8     → z3–z8
@@ -24,13 +24,26 @@ function latToTileY(lat: number, z: number): number {
 }
 
 async function main(): Promise<void> {
-  const { rows } = await query(
-    `SELECT ST_XMin(e) AS min_lon, ST_YMin(e) AS min_lat,
-            ST_XMax(e) AS max_lon, ST_YMax(e) AS max_lat
-     FROM (SELECT ST_Extent(geom::geometry) AS e FROM area_protegida) s`
+  // O MySQL não tem ST_Extent e ST_Envelope não aceita SRID 4326:
+  // envelope de cada UC em SRID 0 (coordenadas continuam lon/lat), e a
+  // extensão total é calculada aqui.
+  const { rows } = await query<{ envelope: { coordinates: unknown } }>(
+    'SELECT ST_AsGeoJSON(ST_Envelope(ST_SRID(geom, 0))) AS envelope FROM area_protegida'
   );
-  const bbox = rows[0];
-  if (!bbox?.min_lon) {
+  const bbox = { min_lon: Infinity, min_lat: Infinity, max_lon: -Infinity, max_lat: -Infinity };
+  const visit = (c: unknown): void => {
+    if (Array.isArray(c) && typeof c[0] === 'number') {
+      const [lon, lat] = c as number[];
+      bbox.min_lon = Math.min(bbox.min_lon, lon);
+      bbox.max_lon = Math.max(bbox.max_lon, lon);
+      bbox.min_lat = Math.min(bbox.min_lat, lat);
+      bbox.max_lat = Math.max(bbox.max_lat, lat);
+    } else if (Array.isArray(c)) {
+      c.forEach(visit);
+    }
+  };
+  rows.forEach((r) => visit(r.envelope.coordinates));
+  if (rows.length === 0) {
     console.log('area_protegida vazia — nada a gerar.');
     return;
   }

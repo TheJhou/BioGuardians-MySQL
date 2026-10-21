@@ -36,13 +36,13 @@ router.get('/taxonomia', cacheMiddleware(undefined, () => 60_000), async (req, r
     const { rank } = req.query;
     if (rank) {
       const { rows } = await query(
-        'SELECT id, nome, "rank", parent_id FROM taxon WHERE "rank" = $1 ORDER BY nome',
+        'SELECT id, nome, `rank`, parent_id FROM taxon WHERE `rank` = ? ORDER BY nome',
         [rank]
       );
       res.json(rows);
     } else {
       const { rows } = await query(
-        'SELECT id, nome, "rank", parent_id FROM taxon ORDER BY id'
+        'SELECT id, nome, `rank`, parent_id FROM taxon ORDER BY id'
       );
       res.json(rows);
     }

@@ -3,9 +3,15 @@ import { query } from '../db/pool.js';
 import { validateId } from '../middleware/validateId.js';
 import { cacheMiddleware, getTileCache, setTileCache } from '../cache/cache.js';
 import { env } from '../config/env.js';
-import { parseParam, getParam } from '../utils/params.js';
+import { parseParam } from '../utils/params.js';
+import { parseBbox } from '../utils/bbox.js';
+import { encodeTile, envelopeWkt, tileEnvelope, ENVELOPE_SQL, type TileFeature } from '../mvt.js';
 
 const router = Router();
+
+// Margem do tile em unidades MVT (4096 = 1 tile) para o raio do círculo
+// não ser cortado na borda entre tiles vizinhos.
+const OCORRENCIA_TILE_BUFFER = 64;
 
 function isValidTile(z: number, x: number, y: number): boolean {
   if (Number.isNaN(z) || Number.isNaN(x) || Number.isNaN(y)) return false;
@@ -20,7 +26,15 @@ function sendTile(res: any, buffer: Buffer): void {
   res.send(buffer);
 }
 
-// GET /api/ocorrencias?especie_id=42 � returns GeoJSON FeatureCollection
+// Lista de IDs separada por vírgula (multi-seleção de espécies), normalizada:
+// ordenada e sem repetição ("2,1" e "1,2" são o mesmo filtro).
+function parseIds(value: unknown): number[] {
+  if (!value) return [];
+  const ids = String(value).split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+// GET /api/ocorrencias?especie_id=42 — returns GeoJSON FeatureCollection
 // Supports bbox (minLng,minLat,maxLng,maxLat) to filter by visible map region.
 router.get('/', cacheMiddleware(undefined, () => 30_000), async (req, res, next) => {
   try {
@@ -28,7 +42,6 @@ router.get('/', cacheMiddleware(undefined, () => 30_000), async (req, res, next)
 
     const conditions: string[] = [];
     const params: unknown[] = [];
-    let idx = 1;
 
     // Default: hide occurrences of inactive species (non-wildlife, e.g. humans/domestic).
     // Pass incluir_inativos=true to see them.
@@ -36,76 +49,58 @@ router.get('/', cacheMiddleware(undefined, () => 30_000), async (req, res, next)
       conditions.push(`e.status = 'ativo'`);
     }
 
-    if (especie_id) {
-      // Aceita lista separada por v�rgula (multi-sele��o de esp�cies).
-      const ids = String(especie_id).split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
-      if (ids.length > 0) {
-        conditions.push(`o.especie_id = ANY($${idx++}::int[])`);
-        params.push(ids);
-      }
+    const ids = parseIds(especie_id);
+    if (ids.length > 0) {
+      conditions.push('o.especie_id IN (?)');
+      params.push(ids);
     }
     if (categoria) {
-      conditions.push(`e.categoria_ameaca = $${idx++}`);
+      conditions.push('e.categoria_ameaca = ?');
       params.push(categoria);
     }
     if (bioma) {
-      conditions.push(`EXISTS (SELECT 1 FROM especie_bioma eb WHERE eb.especie_id = o.especie_id AND eb.bioma_id = $${idx++})`);
+      conditions.push('EXISTS (SELECT 1 FROM especie_bioma eb WHERE eb.especie_id = o.especie_id AND eb.bioma_id = ?)');
       params.push(parseParam(bioma));
     }
     if (fonte) {
-      conditions.push(`o.fonte = $${idx++}`);
+      conditions.push('o.fonte = ?');
       params.push(fonte);
     }
-    if (bbox) {
-      const parts = String(bbox).split(',').map(Number);
-      if (parts.length === 4 && parts.every(n => !isNaN(n))) {
-        // && (bbox overlap) usa o �ndice GIST e � mais barato que ST_Intersects
-        // � equivalente para pontos contra um envelope retangular.
-        conditions.push(`o.geom && ST_MakeEnvelope($${idx}, $${idx + 1}, $${idx + 2}, $${idx + 3}, 4326)`);
-        params.push(parts[0], parts[1], parts[2], parts[3]);
-        idx += 4;
-      }
+    const bounds = parseBbox(bbox);
+    if (bounds) {
+      // MBRIntersects usa o índice espacial; o BETWEEN nas colunas deixa o
+      // recorte exato em lon/lat (a aresta geodésica do envelope se curva).
+      conditions.push(`MBRIntersects(o.geom, ${ENVELOPE_SQL})
+        AND o.lon BETWEEN ? AND ? AND o.lat BETWEEN ? AND ?`);
+      params.push(envelopeWkt(bounds), bounds.minLon, bounds.maxLon, bounds.minLat, bounds.maxLat);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limitClause = limit ? `LIMIT $${idx++}` : 'LIMIT 10000';
-    if (limit) params.push(parseParam(limit));
+    params.push((limit && parseParam(limit)) || 10000);
 
     const { rows } = await query(
-      `SELECT json_build_object(
-         'type', 'FeatureCollection',
-         'features', COALESCE((
-           SELECT json_agg(feature)
-           FROM (
-             SELECT json_build_object(
-               'type', 'Feature',
-               'id', o.id,
-               'geometry', ST_AsGeoJSON(o.geom)::json,
-               'properties', json_build_object(
-                 'especie_id', o.especie_id,
-                 'lat', o.lat,
-                 'lon', o.lon,
-                 'data_evento', o.data_evento,
-                 'fonte', o.fonte,
-                 'base_registro', o.base_registro,
-                'confianca_ia', o.confianca_ia,
-                 'nome_cientifico', e.nome_cientifico,
-                 'nome_popular', e.nome_popular,
-                 'imagem_url', e.imagem_url,
-                 'categoria_ameaca', e.categoria_ameaca
-               )
-             ) AS feature
-             FROM ocorrencia o
-             JOIN especie e ON e.id = o.especie_id
-             ${where}
-             ${limitClause}
-           ) sub
-         ), '[]'::json)
-       ) AS geojson`,
+      `SELECT o.id, o.especie_id, o.lat, o.lon, o.data_evento, o.fonte, o.base_registro,
+              o.confianca_ia,
+              e.nome_cientifico, e.nome_popular, e.imagem_url, e.categoria_ameaca
+       FROM ocorrencia o
+       JOIN especie e ON e.id = o.especie_id
+       ${where}
+       LIMIT ?`,
       params
     );
 
-    res.json(rows[0].geojson);
+    res.json({
+      type: 'FeatureCollection',
+      features: rows.map((r: any) => {
+        const { id, ...properties } = r;
+        return {
+          type: 'Feature',
+          id,
+          geometry: { type: 'Point', coordinates: [r.lon, r.lat] },
+          properties,
+        };
+      }),
+    });
   } catch (err) { next(err); }
 });
 
@@ -121,10 +116,7 @@ router.get('/tiles/:z/:x/:y.mvt', async (req, res, next) => {
     }
 
     const { especie_id, categoria, bioma, fonte, incluir_inativos } = req.query;
-    // IDs normalizados (ordenados, sem repetição): "2,1" e "1,2" são o mesmo tile.
-    const ids = especie_id
-      ? [...new Set(String(especie_id).split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-      : [];
+    const ids = parseIds(especie_id);
     // Chave a partir dos filtros normalizados, não da URL crua.
     const key = `route:/api/ocorrencias/tiles/${z}/${x}/${y}?` +
       `e=${ids.join(',')}&c=${categoria ?? ''}&b=${bioma ?? ''}&f=${fonte ?? ''}&i=${incluir_inativos === 'true'}`;
@@ -134,56 +126,57 @@ router.get('/tiles/:z/:x/:y.mvt', async (req, res, next) => {
       return;
     }
 
-    const conditions: string[] = ['o.geom && ST_Transform(bounds.b, 4326)'];
-    const params: unknown[] = [z, x, y];
-    let idx = 4;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
 
+    // Candidatos pelo índice espacial; o recorte exato no tile é do geojson-vt.
+    const envelope = tileEnvelope(z, x, y, OCORRENCIA_TILE_BUFFER);
+    if (envelope) {
+      conditions.push(`MBRIntersects(o.geom, ${ENVELOPE_SQL})`);
+      params.push(envelope);
+    }
     if (incluir_inativos !== 'true') {
       conditions.push(`e.status = 'ativo'`);
     }
-
     if (ids.length > 0) {
-      conditions.push(`o.especie_id = ANY($${idx++}::int[])`);
+      conditions.push('o.especie_id IN (?)');
       params.push(ids);
     }
     if (categoria) {
-      conditions.push(`e.categoria_ameaca = $${idx++}`);
+      conditions.push('e.categoria_ameaca = ?');
       params.push(categoria);
     }
     if (bioma) {
-      conditions.push(`EXISTS (SELECT 1 FROM especie_bioma eb WHERE eb.especie_id = o.especie_id AND eb.bioma_id = $${idx++})`);
+      conditions.push('EXISTS (SELECT 1 FROM especie_bioma eb WHERE eb.especie_id = o.especie_id AND eb.bioma_id = ?)');
       params.push(parseParam(bioma));
     }
     if (fonte) {
-      conditions.push(`o.fonte = $${idx++}`);
+      conditions.push('o.fonte = ?');
       params.push(fonte);
     }
 
-    const where = conditions.join(' AND ');
-
-    const { rows } = await query(
-      `SELECT COALESCE(encode(ST_AsMVT(mvt, 'ocorrencia', 4096, 'geom'), 'base64'), '') AS mvt
-       FROM (
-         SELECT
-           ST_AsMVTGeom(ST_Transform(o.geom, 3857), bounds.b, 4096, 64, true) AS geom,
-           o.id,
-           o.especie_id,
-           e.categoria_ameaca::text
-         FROM ocorrencia o
-         JOIN especie e ON e.id = o.especie_id
-         CROSS JOIN (SELECT ST_TileEnvelope($1::int, $2::int, $3::int) AS b) bounds
-         WHERE ${where}
-       ) mvt`,
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { rows } = await query<{ id: number; especie_id: number; categoria_ameaca: string; lon: number; lat: number }>(
+      `SELECT o.id, o.especie_id, e.categoria_ameaca, o.lon, o.lat
+       FROM ocorrencia o
+       JOIN especie e ON e.id = o.especie_id
+       ${where}`,
       params
     );
 
-    const buffer = rows[0].mvt ? Buffer.from(rows[0].mvt, 'base64') : Buffer.alloc(0);
+    const features: TileFeature[] = rows.map((r) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [r.lon, r.lat] },
+      properties: { id: r.id, especie_id: r.especie_id, categoria_ameaca: r.categoria_ameaca },
+    }));
+
+    const buffer = encodeTile('ocorrencia', features, z, x, y, OCORRENCIA_TILE_BUFFER);
     setTileCache(key, buffer);
     sendTile(res, buffer);
   } catch (err) { next(err); }
 });
 
-// GET /api/ocorrencias/gbif?especie=panthera+onca � proxy to GBIF API, cached 5min
+// GET /api/ocorrencias/gbif?especie=panthera+onca — proxy to GBIF API, cached 5min
 router.get('/gbif', cacheMiddleware(
   (req) => `gbif:${req.query.especie}`,
   () => 300_000
@@ -234,13 +227,13 @@ router.get('/:id', validateId, async (req, res, next) => {
   try {
     const id = parseParam(req.params.id)!;
     const { rows } = await query(
-      `SELECT o.id, o.especie_id, o.lat::float, o.lon::float,
-              o.data_evento::text, o.fonte::text, o.base_registro,
-              o.confianca_ia::float,
-              e.nome_cientifico, e.nome_popular, e.imagem_url, e.categoria_ameaca::text
+      `SELECT o.id, o.especie_id, o.lat, o.lon,
+              o.data_evento, o.fonte, o.base_registro,
+              o.confianca_ia,
+              e.nome_cientifico, e.nome_popular, e.imagem_url, e.categoria_ameaca
        FROM ocorrencia o
        JOIN especie e ON e.id = o.especie_id
-       WHERE o.id = $1`,
+       WHERE o.id = ?`,
       [id]
     );
 

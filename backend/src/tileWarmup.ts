@@ -4,8 +4,8 @@ import { logger } from './telemetry/logger.js';
 const BRAZIL_BBOX = { minLon: -73.99, minLat: -33.75, maxLon: -34.79, maxLat: 5.27 };
 
 // Zooms caros (tiles grandes, muita geometria). z>=6 é barato por natureza.
-// Só ocorrências: tiles de áreas são persistidos na tabela area_tile
-// (migration 004), não dependem mais de cache em memória.
+// Só ocorrências: tiles de áreas são persistidos na tabela area_tile,
+// não dependem mais de cache em memória.
 const WARMUP_ZOOMS = [3, 4, 5];
 const CONCURRENCY = 4;
 

@@ -1,5 +1,5 @@
 // OpenTelemetry instrumentation MUST be imported first so auto-instrumentation
-// can patch Express, pg, http, etc. before they're loaded.
+// can patch Express, mysql2, http, etc. before they're loaded.
 import './telemetry/instrumentation.js';
 
 import express from 'express';

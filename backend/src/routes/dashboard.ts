@@ -4,19 +4,26 @@ import { cacheMiddleware } from '../cache/cache.js';
 
 const router = Router();
 
-// GET /api/dashboard — returns data from 4 materialized views in parallel.
-// Cached for 60s. Uses Promise.all to fetch all views concurrently.
+// GET /api/dashboard — agregados pré-calculados (tabelas preenchidas por
+// CALL refresh_dashboard()) + consultas leves, em paralelo.
+// Cached for 60s. Uses Promise.all to fetch everything concurrently.
 router.get('/', cacheMiddleware(undefined, () => 60_000), async (_req, res, next) => {
   try {
     const [stats, ranking, ucsEsfera, especiesUc, especiesBioma, occAno, ucsCategoria, topEspecies] = await Promise.all([
-      query('SELECT total_especies::int, total_cr::int, total_en::int, total_vu::int, total_nt::int, total_lc::int, total_dd::int, total_areas::int, area_total_ha::float, total_ocorrencias::int FROM dashboard_stats'),
-      query('SELECT * FROM ranking_especies_categoria'),
-      query('SELECT * FROM ucs_por_esfera'),
+      query('SELECT total_especies, total_cr, total_en, total_vu, total_nt, total_lc, total_dd, total_areas, area_total_ha, total_ocorrencias FROM dashboard_stats'),
+      // Tabela comum não guarda ordem (a view materializada guardava): ordena pela gravidade.
+      query(
+        `SELECT r.categoria_ameaca, r.total
+         FROM ranking_especies_categoria r
+         JOIN categoria_ameaca c ON c.codigo = r.categoria_ameaca
+         ORDER BY c.ordem_prioridade`
+      ),
+      query('SELECT esfera, total, area_ha FROM ucs_por_esfera ORDER BY total DESC'),
       // Top 6 espécies por quantidade de UCs distintas em que ocorrem
       // (junção pré-calculada por trigger — cobre todas as espécies ativas).
       query(
         `SELECT e.id AS especie_id, e.nome_cientifico, e.nome_popular, e.imagem_url,
-                COUNT(DISTINCT oa.area_id)::int AS total_ucs
+                COUNT(DISTINCT oa.area_id) AS total_ucs
          FROM ocorrencia_area oa
          JOIN ocorrencia o ON o.id = oa.ocorrencia_id
          JOIN especie e ON e.id = o.especie_id AND e.status = 'ativo'
@@ -26,7 +33,7 @@ router.get('/', cacheMiddleware(undefined, () => 60_000), async (_req, res, next
       ),
       // Espécies por bioma (via vínculo especie↔bioma).
       query(
-        `SELECT b.nome, COUNT(DISTINCT e.id)::int AS total
+        `SELECT b.nome, COUNT(DISTINCT e.id) AS total
          FROM bioma b
          JOIN especie_bioma eb ON eb.bioma_id = b.id
          JOIN especie e ON e.id = eb.especie_id AND e.status = 'ativo'
@@ -36,19 +43,19 @@ router.get('/', cacheMiddleware(undefined, () => 60_000), async (_req, res, next
       // Ocorrências por ano — data_evento com fallback para criado_em,
       // assim registros sem data do evento também entram no gráfico.
       query(
-        `SELECT EXTRACT(YEAR FROM COALESCE(o.data_evento, o.criado_em))::int AS ano, COUNT(*)::int AS total
+        `SELECT YEAR(COALESCE(o.data_evento, o.criado_em)) AS ano, COUNT(*) AS total
          FROM ocorrencia o
          GROUP BY ano
          ORDER BY ano`
       ),
       query(
-        `SELECT categoria_uc, COUNT(*)::int AS total
+        `SELECT categoria_uc, COUNT(*) AS total
          FROM area_protegida
          GROUP BY categoria_uc`
       ),
       // Top 6 espécies por número de ocorrências.
       query(
-        `SELECT o.especie_id, e.nome_cientifico, e.nome_popular, COUNT(*)::int AS total
+        `SELECT o.especie_id, e.nome_cientifico, e.nome_popular, COUNT(*) AS total
          FROM ocorrencia o
          JOIN especie e ON e.id = o.especie_id AND e.status = 'ativo'
          GROUP BY o.especie_id, e.nome_cientifico, e.nome_popular
