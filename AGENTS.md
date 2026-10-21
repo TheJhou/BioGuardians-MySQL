@@ -20,7 +20,7 @@
 backend/        API Express (routes/, cache/, db/, middleware/, telemetry/, utils/, tileStore.ts, tileWarmup.ts)
 backend/scripts/generateAreaTiles.ts   pré-geração dos tiles MVT das UCs
 frontend/       SPA React (pages/, components/, lib/, api/client.ts, styles/)
-db/             migrate.sh, migrations/ (001), tests/smoke_test.sql
+db/             migrate.sh, migrations/ (001–002), tests/smoke_test.sql
 ml-service/     FastAPI + CLI de classificação de camera trap
 scripts/data/   importadores e enriquecimento (MMA, CNUC, GBIF, speciesLink, Wikipedia, iNaturalist)
 observability/ + otel-collector-config.yaml   configs da stack Grafana
@@ -42,6 +42,7 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 
 ### Migrations existentes
 1. `001_initial.sql` — schema MySQL consolidado, equivalente ao estado final das antigas migrations PostgreSQL 001–005 (que ficam no histórico do git): tabelas, índices espaciais, triggers, procedure `refresh_dashboard()`, tabelas de agregados do dashboard e dados de referência (categorias, biomas, estados)
+2. `002_planar_geom_validation.sql` — os triggers de `area_protegida` validam a geometria no plano (`ST_IsValid(ST_SRID(geom, 0))`, mesmo critério do PostGIS). Em SRID 4326 o MySQL valida no elipsoide e recusava 94 das 3.371 UCs de produção
 
 ## Comandos úteis
 - Subir banco (Docker): `docker compose up -d db`
@@ -58,7 +59,8 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 
 ## Decisões de modelagem
 - SRID 4326 (WGS84) para todas as geometrias. **Ordem dos eixos**: no MySQL, em SRID 4326, `ST_X` devolve a **latitude** e `ST_AsText`/`ST_GeomFromText` usam lat/lon. Use `ST_Longitude`/`ST_Latitude`, GeoJSON (`ST_GeomFromGeoJSON`/`ST_AsGeoJSON`, sempre lon/lat) ou `ST_SRID(POINT(lon, lat), 4326)`. O smoke test 8 pega a inversão
-- Cálculos espaciais em SRID 4326 são geodésicos no MySQL (no PostGIS `geometry` eram planares): bordas de polígono longas podem dar resultado levemente diferente em `ST_Contains`
+- Cálculos espaciais em SRID 4326 são geodésicos no MySQL (no PostGIS `geometry` eram planares). Na cópia do backup de produção, `ST_Contains` deu exatamente as mesmas ligações ocorrência↔UC que o PostGIS
+- Validação de geometria: no plano (migration 002). Mesmo assim, o validador do MySQL (Boost) recusa alguns polígonos que o PostGIS (GEOS) aceita (18 UCs de produção). Ao migrar dados do PostgreSQL, exporte essas com `ST_MakeValid(ST_SnapToGrid(geom, 1e-7))` (~1 cm; variação de área ≤ 0,0002%)
 - Colação padrão `utf8mb4_0900_as_cs` (sensível a acento e caixa, como no PostgreSQL). Busca sem acento: `col COLLATE utf8mb4_0900_ai_ci LIKE ...` (substitui `unaccent(lower(...))`)
 - `nome_cientifico` com `CHECK` (lowercase, trim, ≥ 4 caracteres); UF `CHAR(2)` com `CHECK` de maiúsculas
 - Enums do PostgreSQL viram `ENUM` na coluna; `rank` é palavra reservada no MySQL 8 — sempre `` `rank` ``
