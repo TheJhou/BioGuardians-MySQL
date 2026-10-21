@@ -14,12 +14,13 @@ concurrency:
 permissions:
   contents: read
 
+# Ephemeral database that only lives inside the job: fixed credentials, no secrets.
 env:
-  DB_HOST: localhost
-  DB_PORT: 5432
-  DB_USER: ${{ secrets.DB_USER }}
-  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-  DB_NAME: ${{ secrets.DB_NAME }}
+  DB_HOST: 127.0.0.1
+  DB_PORT: 3306
+  DB_USER: bioguard_ci
+  DB_PASSWORD: bioguard_ci
+  DB_NAME: bioguardians_ci
 
 jobs:
   validate:
@@ -27,18 +28,17 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      postgres:
-        image: postgis/postgis:16-3.4
+      mysql:
+        image: mysql:8.4
         env:
-          POSTGRES_USER: ${{ secrets.DB_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          POSTGRES_DB: ${{ secrets.DB_NAME }}
-          PGUSER: ${{ secrets.DB_USER }}
-          PGDATABASE: ${{ secrets.DB_NAME }}
+          MYSQL_ROOT_PASSWORD: root_ci
+          MYSQL_USER: bioguard_ci
+          MYSQL_PASSWORD: bioguard_ci
+          MYSQL_DATABASE: bioguardians_ci
         ports:
-          - 5432:5432
+          - 3306:3306
         options: >-
-          --health-cmd "pg_isready"
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot_ci --silent"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -46,18 +46,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+      # Service containers can't receive mysqld flags; without this, a
+      # non-SUPER user can't create triggers while binary logging is on.
+      - name: Allow trigger creation
+        run: mysql -h 127.0.0.1 -uroot -proot_ci -e "SET PERSIST log_bin_trust_function_creators = 1;"
 
       - name: Run migrations (ephemeral)
         run: bash db/migrate.sh
 
       - name: Run smoke tests (ephemeral)
-        env:
-          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
-        run: psql -v ON_ERROR_STOP=1 -h localhost -U "$DB_USER" -d "$DB_NAME" -f db/tests/smoke_test.sql
+        run: mysql --default-character-set=utf8mb4 -h 127.0.0.1 -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" < db/tests/smoke_test.sql
 
       - name: Verify migration idempotency
         run: bash db/migrate.sh

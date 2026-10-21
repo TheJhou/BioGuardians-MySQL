@@ -1,7 +1,13 @@
 # BioGuardians — Project Info
 
+> **Migração PostgreSQL → MySQL em andamento** (fork de `TheJhou/BioGuardians`).
+> Feito: schema (`db/`), `migrate.sh`, smoke test, compose (dev) e CI.
+> Falta: backend (driver + SQL das rotas), tiles MVT gerados no Node (o MySQL não tem
+> `ST_AsMVT`), scripts de `scripts/data/`, ML service (asyncpg) e deploy/VM.
+> Até lá, o backend, os loaders e o ML service ainda falam PostgreSQL e não rodam contra este banco.
+
 ## Stack
-- **Database**: PostgreSQL 16 + PostGIS 3.4 (+ extensões `pgcrypto`, `unaccent`)
+- **Database**: MySQL 8.4 LTS (tipos espaciais nativos, SRID 4326)
 - **Backend**: Node.js 22 + Express 5 + TypeScript (porta 3001)
 - **Frontend**: React 19 + Vite + TypeScript + MapLibre GL (via react-map-gl) + MapTiler Cloud + Chart.js
 - **ML Service**: Python 3.11 + FastAPI + OpenRouter (Claude Sonnet 4); Qwen2-VL-2B local opcional (porta 8001, local com GPU)
@@ -14,7 +20,7 @@
 backend/        API Express (routes/, cache/, db/, middleware/, telemetry/, utils/, tileStore.ts, tileWarmup.ts)
 backend/scripts/generateAreaTiles.ts   pré-geração dos tiles MVT das UCs
 frontend/       SPA React (pages/, components/, lib/, api/client.ts, styles/)
-db/             migrate.sh, migrations/ (001–004), tests/smoke_test.sql
+db/             migrate.sh, migrations/ (001), tests/smoke_test.sql
 ml-service/     FastAPI + CLI de classificação de camera trap
 scripts/data/   importadores e enriquecimento (MMA, CNUC, GBIF, speciesLink, Wikipedia, iNaturalist)
 observability/ + otel-collector-config.yaml   configs da stack Grafana
@@ -25,41 +31,45 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 ## Migrations
 - Sistema customizado em `db/migrate.sh` (sem ferramentas de terceiros)
 - Journal table: `schema_migrations` (filename + checksum SHA-256)
-- Cada migration roda numa transação junto com o registro no journal, **exceto** as que começam com `-- @no-transaction` (hoje só a `001`, porque `ALTER TYPE ... ADD VALUE` não pode dividir transação com o uso do valor novo)
+- DDL no MySQL faz commit implícito: uma migration **não** é transacional. O registro no journal só é gravado depois que o arquivo inteiro rodou sem erro; por isso toda migration precisa ser idempotente (se falhar no meio, roda de novo)
 - Se um arquivo já aplicado for alterado (hash diferente), o `migrate.sh` **aborta** — nunca edite uma migration aplicada; crie a próxima
 - O `deploy.yml` exige numeração sequencial (`001`, `002`, …) sem buracos
-- Todas as migrations são idempotentes (`IF NOT EXISTS`, `ADD VALUE IF NOT EXISTS`, `DROP + CREATE` para triggers/matviews)
+- Idempotência no MySQL: `CREATE TABLE IF NOT EXISTS` com índices dentro do `CREATE TABLE` (não existe `CREATE INDEX IF NOT EXISTS` nem `ADD COLUMN IF NOT EXISTS`), `DROP ... IF EXISTS` + `CREATE` para triggers/procedures, `INSERT ... ON DUPLICATE KEY UPDATE` para dados de referência
+- Triggers e procedures ficam entre `DELIMITER $$` … `DELIMITER ;` (o `migrate.sh` usa o cliente `mysql`, que entende `DELIMITER`)
+- O usuário da aplicação só cria triggers com `log_bin_trust_function_creators=1` no servidor (já no compose e no CI)
+- O cliente `mysql` usa `latin1` por padrão: sempre `--default-character-set=utf8mb4` (o `migrate.sh` já faz isso)
 - Comandos: `sh db/migrate.sh`, `--status`, `--dry-run`
 
 ### Migrations existentes
-1. `001_initial.sql` — schema consolidado (equivale às antigas 000–024): extensões, enums/domínios, todas as tabelas (inclusive ML e `cache_metadata`), índices, funções, triggers, views materializadas, dados de referência (categorias, biomas, estados) e `ALTER DATABASE SET` de parâmetros de performance
-2. `002_schema_hardening.sql` — `log_auditoria.registro_id` → BIGINT, coluna `deteccao.geom` + GIST, trigger de sincronização bidirecional lat/lon ↔ geom (`trg_sincroniza_geom_latlon`) em `ocorrencia` e `deteccao`, `dashboard_stats` reescrita com `FILTER` (scan único)
-3. `003_ocorrencia_area.sql` — tabela de junção `ocorrencia_area` mantida por triggers; `especies_em_area`, `areas_protegem_especie`, `contar_ocorrencias_em_area` e `especies_por_uc` passam a usar JOIN de inteiros em vez de `ST_Contains` na leitura
-4. `004_area_tile_cache.sql` — tabela `area_tile` (cache persistente dos tiles MVT das UCs, ver `docs/AREA_TILE_CACHE.md`)
-5. `005_audit_without_geometry.sql` — `trg_auditar` troca a coluna `geom` por `geom_md5` no JSON do log (o polígono inteiro chegava a 6 MB por registro)
+1. `001_initial.sql` — schema MySQL consolidado, equivalente ao estado final das antigas migrations PostgreSQL 001–005 (que ficam no histórico do git): tabelas, índices espaciais, triggers, procedure `refresh_dashboard()`, tabelas de agregados do dashboard e dados de referência (categorias, biomas, estados)
 
 ## Comandos úteis
 - Subir banco (Docker): `docker compose up -d db`
 - Aplicar migrations (Docker): `docker compose run --rm migrate`
 - Aplicar migrations (nativo): `sh db/migrate.sh`
 - Status das migrations: `sh db/migrate.sh --status`
-- Smoke tests: `psql -f db/tests/smoke_test.sql` (credenciais via .env)
+- Smoke tests: `docker exec -i bioguardians-db mysql --default-character-set=utf8mb4 -u $DB_USER -p$DB_PASSWORD $DB_NAME < db/tests/smoke_test.sql`
 - Resetar banco: `docker compose down -v && docker compose up -d db && docker compose run --rm migrate`
-- Conectar: `psql -d $DB_NAME -U $DB_USER`
-- Refresh views: `SELECT refresh_dashboard();` (os loaders de `scripts/data` já chamam no final)
+- Conectar: `docker exec -it bioguardians-db mysql --default-character-set=utf8mb4 -u $DB_USER -p $DB_NAME`
+- Refresh dos agregados do dashboard: `CALL refresh_dashboard();`
 - Pré-gerar tiles das UCs: `cd backend && npm run generate-area-tiles`
 - Typecheck: `npm run typecheck` em `backend/` e `frontend/`
 - Subir produção: `cd ~/bioguardians && sudo docker compose -f stack.yml pull && sudo docker compose -f stack.yml up -d`
 
 ## Decisões de modelagem
-- SRID 4326 (WGS84) para todas as geometrias
-- `nome_cientifico` em domínio próprio (lowercase, trim)
-- UF em domínio `CHAR(2)` maiúsculo
+- SRID 4326 (WGS84) para todas as geometrias. **Ordem dos eixos**: no MySQL, em SRID 4326, `ST_X` devolve a **latitude** e `ST_AsText`/`ST_GeomFromText` usam lat/lon. Use `ST_Longitude`/`ST_Latitude`, GeoJSON (`ST_GeomFromGeoJSON`/`ST_AsGeoJSON`, sempre lon/lat) ou `ST_SRID(POINT(lon, lat), 4326)`. O smoke test 8 pega a inversão
+- Cálculos espaciais em SRID 4326 são geodésicos no MySQL (no PostGIS `geometry` eram planares): bordas de polígono longas podem dar resultado levemente diferente em `ST_Contains`
+- Colação padrão `utf8mb4_0900_as_cs` (sensível a acento e caixa, como no PostgreSQL). Busca sem acento: `col COLLATE utf8mb4_0900_ai_ci LIKE ...` (substitui `unaccent(lower(...))`)
+- `nome_cientifico` com `CHECK` (lowercase, trim, ≥ 4 caracteres); UF `CHAR(2)` com `CHECK` de maiúsculas
+- Enums do PostgreSQL viram `ENUM` na coluna; `rank` é palavra reservada no MySQL 8 — sempre `` `rank` ``
 - Taxonomia hierárquica com auto-referência (reino → gênero)
-- Auditoria via trigger genérico (`to_jsonb` do registro inteiro) em `especie` e `area_protegida`
+- Auditoria por triggers em `especie` e `area_protegida` com `JSON_OBJECT` coluna a coluna (o MySQL não tem `to_jsonb(NEW)`); em `area_protegida` o polígono vira `geom_md5`. Coluna nova nessas tabelas = atualizar os triggers de auditoria
+- `geom` de `ocorrencia` e `deteccao` é derivada de lat/lon por trigger (não precisa ser informada no `INSERT`)
 - Relação ocorrência ↔ UC pré-calculada em `ocorrencia_area` (trigger na escrita) — leitura sem `ST_Contains`
-- Views materializadas com índice único (permite `REFRESH ... CONCURRENTLY` fora de função); `refresh_dashboard()` usa refresh simples (CONCURRENTLY não roda dentro de função)
+- O MySQL não tem views materializadas: `dashboard_stats`, `especies_por_uc`, `ranking_especies_categoria` e `ucs_por_esfera` são tabelas comuns preenchidas por `CALL refresh_dashboard()` (numa transação)
+- Removidos no porte por não terem uso: `buscar_especies` + `tsv_busca`, `contar_ocorrencias_em_area`, `cache_metadata`. `especies_em_area` e `areas_protegem_especie` (funções que retornavam tabela) passam para SQL nas rotas
 - Tiles MVT das UCs persistidos em `area_tile` (z3–z6 pré-gerados, demais sob demanda)
+- **Procedures/triggers**: nunca dê a uma variável local o nome de uma coluna (`WHERE genero_id = genero_id` compara a variável com ela mesma e casa todas as linhas). Use o prefixo `v_`
 
 ## Frontend
 - Rotas: `/` → redireciona para `/home`; `/home`, `/dashboard`, `/mapa`, `/especies`, `/especies/:id`; `/sobre` é placeholder; qualquer outra → `/home`
