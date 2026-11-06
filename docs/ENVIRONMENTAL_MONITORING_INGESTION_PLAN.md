@@ -64,6 +64,22 @@ Não manter uma transação aberta durante downloads. Também não apagar evento
 não aparecerem em uma resposta parcial do WFS: ausência numa página ou numa
 execução incompleta não significa que o alerta foi removido da fonte.
 
+### Carga inicial e reprocessamento por CLI
+
+Além do agendador, planejar um comando operacional para importar um CSV local,
+fazer uma carga inicial controlada e reprocessar uma janela. O comando deve
+chamar o mesmo parser, normalizador e serviço de persistência do worker; não criar
+uma segunda implementação de ingestão. Incluir `--dry-run` e um limite opcional
+de registros para conferir o mapeamento antes de gravar. A execução deve ser
+registrada em `monitor_execucao`, inclusive quando houver erro ou rejeições.
+
+Para o DETER, o adapter deve usar WFS com camada e CRS confirmados; uma carga de
+arquivo baixado pode ser adicionada se o formato e a necessidade operacional
+forem definidos. O acesso público aos alertas tem atraso de uma semana; o acesso
+diário antecipado é restrito a instituições responsáveis por fiscalização.
+Planejar a cadência e o ambiente de teste conforme essa disponibilidade. [FAQ do
+TerraBrasilis](https://terrabrasilis.dpi.inpe.br/faq/)
+
 ### INPE / Programa Queimadas
 
 A migration registra inicialmente o CSV diário do Brasil e uma frequência de
@@ -199,3 +215,28 @@ mesma transação.
   rejeição.
 - A API retorna páginas limitadas e apenas métodos GET; o status da coleta pode
   ser consultado sem tornar o healthcheck geral dependente de um feed externo.
+
+## Plano de validação
+
+1. **Parser offline:** manter um pequeno fixture baseado no cabeçalho e em linhas
+   representativas do CSV oficial do INPE; validar aliases, aspas, datas GMT,
+   coordenadas, valores ausentes e rejeições sem depender da rede.
+2. **Integração MySQL 8.4:** em banco descartável, aplicar as migrations e
+   importar o fixture. Conferir contagens da execução, geometria SRID 4326,
+   relacionamentos, atendimento `novo` e histórico inicial.
+3. **Idempotência:** importar o mesmo fixture de novo; confirmar que não duplica
+   eventos nem cria histórico repetido. Preparar o evento com status diferente
+   de `novo` no banco descartável e confirmar que o upsert preserva esse estado.
+4. **API:** consultar lista, detalhe, resumo e execução após a carga e verificar
+   filtros, paginação e GeoJSON. Continuar usando apenas GET.
+5. **Smoke test com fonte real:** em ambiente local ou de staging, baixar um CSV
+   oficial de escopo limitado, registrar URL/data/checksum da entrada e executar
+   o fluxo até consultar o evento pela API. Repetir a importação para verificar
+   deduplicação. Não depender da rede externa no CI.
+6. **DETER ao habilitar:** consultar uma janela pequena na camada WFS confirmada;
+   conferir paginação, CRS, geometria poligonal e atribuição. Não habilitar a
+   fonte enquanto os metadados e o acesso não estiverem validados.
+
+O smoke test real complementa os testes com fixture: verifica disponibilidade,
+formato atual da fonte, compatibilidade com MySQL e exposição pela API. Deve usar
+banco descartável ou staging, nunca uma carga exploratória direto em produção.
