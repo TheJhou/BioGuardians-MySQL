@@ -1,8 +1,8 @@
 # BioGuardians
 
-Sistema de banco de dados espacial (PostgreSQL + PostGIS) para gestão de
-**espécies ameaçadas** e **áreas protegidas** no Brasil, com aplicação web
-(Node.js + React + MapTiler Cloud) como camada fina de demonstração.
+Sistema de banco de dados espacial (MySQL 8.4, com tipos espaciais nativos)
+para gestão de **espécies ameaçadas** e **áreas protegidas** no Brasil, com
+aplicação web (Node.js + React + MapTiler Cloud) como camada fina de demonstração.
 
 > Projeto da disciplina de **Banco de Dados** — foco em modelagem, persistência,
 > consultas espaciais, integridade e recursos avançados de BD.
@@ -22,7 +22,7 @@ BioGuardians/
 │   └── deploy.yml                    # main: build GHCR, migrations, deploy na VM
 ├── db/
 │   ├── migrate.sh                    # migration runner
-│   ├── migrations/                   # 001–004 (SQL numerados)
+│   ├── migrations/                   # 001–003 (SQL numerados)
 │   └── tests/smoke_test.sql
 ├── backend/                          # Node 22 + Express 5 + TypeScript
 │   └── scripts/generateAreaTiles.ts  # pré-geração dos tiles das UCs
@@ -35,6 +35,7 @@ BioGuardians/
     ├── PROJECT_PLAN.md
     ├── DATA_DICTIONARY.md
     ├── ERD.md
+    ├── ENVIRONMENTAL_MONITORING_MODEL.md
     ├── OBSERVABILITY.md
     └── AREA_TILE_CACHE.md
 ```
