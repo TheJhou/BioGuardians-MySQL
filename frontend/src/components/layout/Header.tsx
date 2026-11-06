@@ -7,6 +7,7 @@ const navItems = [
   { to: '/home', label: 'Home' },
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/mapa', label: 'Mapa' },
+  { to: '/monitoramento', label: 'Monitoramento' },
   { to: '/especies', label: 'Espécies' },
 ];
 
@@ -14,6 +15,7 @@ const bottomNavItems: { to: string; label: string; icon: () => ReactNode }[] = [
   { to: '/home', label: 'Home', icon: HomeIcon },
   { to: '/dashboard', label: 'Dashboard', icon: DashboardIcon },
   { to: '/mapa', label: 'Mapa', icon: MapIcon },
+  { to: '/monitoramento', label: 'Alertas', icon: MonitorIcon },
   { to: '/especies', label: 'Espécies', icon: SpeciesIcon },
 ];
 
@@ -52,6 +54,16 @@ function SpeciesIcon() {
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 2a4 4 0 0 0-4 4c0 2.5 2 4 4 6.5 2-2.5 4-4 4-6.5a4 4 0 0 0-4-4z" />
       <path d="M12 12c-3.5 0-6 2.5-6 6v4h12v-4c0-3.5-2.5-6-6-6z" />
+    </svg>
+  );
+}
+
+function MonitorIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 22s8-4.5 8-12V5l-8-3-8 3v5c0 7.5 8 12 8 12z" />
+      <path d="M12 8v4" />
+      <path d="M12 16h.01" />
     </svg>
   );
 }

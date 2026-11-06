@@ -2,6 +2,7 @@ import type {
   Bioma, Estado, Categoria, Taxon, Especie, EspecieBusca,
   GeoJSONFeatureCollection, OcorrenciaProperties, DashboardData,
   EspecieEmArea, AreaProtegeEspecie, PaginatedResponse, AreaInfo,
+  MonitorEventCollection, MonitorEventDetail, MonitorSummary, MonitorSource,
 } from '../types/index.js';
 
 export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
@@ -173,5 +174,28 @@ export const api = {
   // Dashboard
   async getDashboard(): Promise<DashboardData> {
     return fetchApi<DashboardData>('/dashboard');
+  },
+
+  // Monitoramento ambiental — consultas somente GET.
+  async getMonitoramentoEventos(params?: {
+    tipo?: string; fonte?: string; bioma_id?: number; estado_uf?: string;
+    desde?: string; ate?: string; status?: string; prioridade?: string;
+    bbox?: string; page?: number; per_page?: number;
+  }): Promise<MonitorEventCollection> {
+    const query = buildQs(params ?? {});
+    return fetchDeduplicated<MonitorEventCollection>(`/monitoramento/eventos${query ? `?${query}` : ''}`);
+  },
+
+  async getMonitoramentoEvento(id: number): Promise<MonitorEventDetail> {
+    return fetchApi<MonitorEventDetail>(`/monitoramento/eventos/${id}`);
+  },
+
+  async getMonitoramentoResumo(params?: { desde?: string; ate?: string }): Promise<MonitorSummary> {
+    const query = buildQs(params ?? {});
+    return fetchApi<MonitorSummary>(`/monitoramento/resumo${query ? `?${query}` : ''}`);
+  },
+
+  async getMonitoramentoFontes(): Promise<{ data: MonitorSource[] }> {
+    return fetchApi<{ data: MonitorSource[] }>('/monitoramento/fontes');
   },
 };

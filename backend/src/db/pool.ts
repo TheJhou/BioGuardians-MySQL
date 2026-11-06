@@ -42,6 +42,11 @@ export interface QueryResult<T> {
   rowCount: number;
 }
 
+export interface ExecuteResult {
+  affectedRows: number;
+  insertId: number;
+}
+
 // Placeholders são "?" (posicionais). Arrays viram listas: "IN (?)" com [1, 2, 3].
 export async function query<T = any>(
   text: string,
@@ -78,6 +83,34 @@ export async function query<T = any>(
       ...(traceId ? { trace_id: traceId } : {}),
     });
 
+    throw err;
+  }
+}
+
+export async function execute(text: string, params?: unknown[]): Promise<ExecuteResult> {
+  const start = Date.now();
+  const traceId = getTraceId();
+  try {
+    const [result] = await pool.execute<ResultSetHeader>(text, params as any[] | undefined);
+    const duration_ms = Date.now() - start;
+    dbOperationDuration.record(duration_ms / 1000, { 'db.operation': sqlOperation(text) });
+    logger.info('db_execute', {
+      duration_ms,
+      rows: result.affectedRows,
+      params_count: params?.length ?? 0,
+      sql: summarizeSql(text),
+      ...(traceId ? { trace_id: traceId } : {}),
+    });
+    return { affectedRows: result.affectedRows, insertId: result.insertId };
+  } catch (err) {
+    const duration_ms = Date.now() - start;
+    logger.error('db_execute_failed', {
+      duration_ms,
+      params_count: params?.length ?? 0,
+      sql: summarizeSql(text),
+      error: err instanceof Error ? err.message : String(err),
+      ...(traceId ? { trace_id: traceId } : {}),
+    });
     throw err;
   }
 }
