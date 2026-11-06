@@ -221,6 +221,26 @@ geográficos com dados de espécies.
 - **Enums ou domínios** para categoria_ameaca e esfera
 - **Índices** em colunas de busca frequente (nome_cientifico, categoria, geom)
 
+### Extensão: monitoramento ambiental
+
+A migration `003_monitoramento_ambiental.sql` acrescenta um domínio separado
+para focos de calor do INPE e alertas do DETER. A modelagem detalhada, o
+mapeamento de campos e as decisões de atendimento estão em
+[`ENVIRONMENTAL_MONITORING_MODEL.md`](ENVIRONMENTAL_MONITORING_MODEL.md).
+
+- `monitor_fonte`, `monitor_tipo_evento` e `monitor_execucao` catalogam as
+  fontes e rastreiam as coletas.
+- `monitor_evento` guarda os dados de origem e a geometria SRID 4326, sem
+  misturar alertas ambientais com observações de espécies.
+- `monitor_prioridade` guarda o score calculado pelo projeto e a versão da
+  regra.
+- `monitor_atendimento` guarda o status corrente (`novo`, `em_andamento`,
+  `resolvido`) e `monitor_atendimento_historico` registra cada transição.
+- `monitor_evento_uc` relaciona alertas às UCs por interseção espacial.
+
+Esta migration cria o schema. Os carregadores das fontes, as rotas da API e a
+interface de atendimento são etapas de integração posteriores.
+
 ## 7. Fontes de Dados
 
 | Fonte | Formato | Conteúdo | Uso |
