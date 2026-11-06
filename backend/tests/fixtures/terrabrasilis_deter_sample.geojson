@@ -1,0 +1,50 @@
+{
+  "type": "FeatureCollection",
+  "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}},
+  "features": [
+    {
+      "type": "Feature",
+      "id": "deter_amz.integration-template_curr",
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [[[[-53.90, -11.24], [-53.89, -11.24], [-53.89, -11.23], [-53.90, -11.23], [-53.90, -11.24]]]]
+      },
+      "properties": {
+        "gid": "integration-template_curr",
+        "classname": "DESMATAMENTO_CR",
+        "view_date": "2024-09-24",
+        "sensor": "WFI",
+        "satellite": "CBERS-4A",
+        "areamunkm": 0.1,
+        "municipality": "MARCELÂNDIA",
+        "mun_geocod": "5105622",
+        "uf": "MT",
+        "publish_month": "2024-10-01"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "deter_amz.integration-template_curr",
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [[[[-53.90, -11.24], [-53.89, -11.24], [-53.89, -11.23], [-53.90, -11.23], [-53.90, -11.24]]]]
+      },
+      "properties": {
+        "gid": "integration-template_curr",
+        "classname": "DESMATAMENTO_CR",
+        "view_date": "2024-09-24",
+        "sensor": "WFI",
+        "satellite": "CBERS-4A",
+        "municipality": "MARCELÂNDIA",
+        "mun_geocod": "5105622",
+        "uf": "MT"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "deter_amz.bad-geometry_curr",
+      "geometry": {"type": "LineString", "coordinates": [[-53.90, -11.24], [-53.89, -11.23]]},
+      "properties": {"view_date": "2024-09-24", "classname": "DESMATAMENTO_CR"}
+    }
+  ]
+}

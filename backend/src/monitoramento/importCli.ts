@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { importInpeCsv } from './ingestion.js';
+import { importMonitorSource } from './runner.js';
 
 function parseArgs(args: string[]): Record<string, string | boolean> {
   const options: Record<string, string | boolean> = {};
@@ -23,9 +23,12 @@ async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const source = String(options.source ?? 'inpe_queimadas_diario_br');
   const limit = options.limit === undefined ? undefined : Number(options.limit);
-  const summary = await importInpeCsv({
+  const windowDays = options['janela-dias'] === undefined ? undefined : Number(options['janela-dias']);
+  const summary = await importMonitorSource({
     sourceCode: source,
     date: typeof options.date === 'string' ? options.date : undefined,
+    since: typeof options.since === 'string' ? options.since : undefined,
+    windowDays,
     file: typeof options.file === 'string' ? options.file : undefined,
     limit,
     dryRun: options['dry-run'] === true,

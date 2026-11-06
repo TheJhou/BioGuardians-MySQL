@@ -70,7 +70,7 @@ jobs:
         working-directory: backend
         run: npm ci
 
-      - name: Test environmental CSV parser
+      - name: Test environmental source parsers
         working-directory: backend
         run: npm run test:monitoramento
 

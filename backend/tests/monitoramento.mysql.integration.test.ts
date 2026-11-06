@@ -7,31 +7,37 @@ import { after, test } from 'node:test';
 import express from 'express';
 import type { Server } from 'node:http';
 import { execute, pool, query } from '../src/db/pool.js';
+import { importDeterWfs } from '../src/monitoramento/deter.js';
 import { importInpeCsv } from '../src/monitoramento/ingestion.js';
 import monitoramentoRoutes from '../src/routes/monitoramento.js';
 
 let server: Server | undefined;
 const executionIds: number[] = [];
-let tempFile = '';
+const tempFiles: string[] = [];
 let sourceId = 0;
+let deterSourceId = 0;
 let areaId = 0;
 let externalIds: string[] = [];
+let deterExternalId = '';
 
 after(async () => {
   if (server?.listening) await new Promise<void>((resolve, reject) => server!.close((error) => error ? reject(error) : resolve()));
   if (sourceId && externalIds.length) {
     await query('DELETE FROM monitor_evento WHERE fonte_id = ? AND id_externo IN (?)', [sourceId, externalIds]);
   }
+  if (deterSourceId && deterExternalId) {
+    await query('DELETE FROM monitor_evento WHERE fonte_id = ? AND id_externo = ?', [deterSourceId, deterExternalId]);
+  }
   if (executionIds.length) await query('DELETE FROM monitor_execucao WHERE id IN (?)', [executionIds]);
   if (areaId) {
     await execute('DELETE FROM area_protegida WHERE id = ?', [areaId]);
     await query("DELETE FROM log_auditoria WHERE tabela = 'area_protegida' AND registro_id = ?", [areaId]);
   }
-  if (tempFile) await unlink(tempFile).catch(() => undefined);
+  await Promise.all(tempFiles.map((file) => unlink(file).catch(() => undefined)));
   await pool.end();
 });
 
-test('CSV real no MySQL cria eventos e GET os devolve; reimportação preserva atendimento', async () => {
+test('INPE CSV e DETER WFS criam eventos espaciais; GET os devolve e reimportações preservam atendimento', async () => {
   const suffix = randomUUID();
   const ids = [`integration-${suffix}-1`, `integration-${suffix}-2`];
   externalIds = ids;
@@ -39,12 +45,19 @@ test('CSV real no MySQL cria eventos e GET os devolve; reimportação preserva a
   const csv = (await readFile(fixturePath, 'utf8'))
     .replaceAll('b19636a6-b8b6-37eb-8da0-0d1648486079', ids[0])
     .replaceAll('725832b2-3fda-3c04-8ff6-b7983797f211', ids[1]);
-  tempFile = join(tmpdir(), `bioguardians-monitor-${suffix}.csv`);
-  await (await import('node:fs/promises')).writeFile(tempFile, csv, 'utf8');
+  const inpeFile = join(tmpdir(), `bioguardians-monitor-${suffix}.csv`);
+  tempFiles.push(inpeFile);
+  await (await import('node:fs/promises')).writeFile(inpeFile, csv, 'utf8');
 
   const sources = await query<{ id: number }>('SELECT id FROM monitor_fonte WHERE codigo = ?', ['inpe_queimadas_diario_br']);
   assert.ok(sources.rows[0], 'fonte INPE deve existir após aplicar as migrations');
   sourceId = sources.rows[0].id;
+  const deterSource = await query<{ id: number }>(
+    'SELECT id FROM monitor_fonte WHERE codigo = ?',
+    ['terrabrasilis_deter_amazonia_wfs']
+  );
+  assert.ok(deterSource.rows[0], 'fonte DETER Amazônia deve existir após aplicar as migrations');
+  deterSourceId = deterSource.rows[0].id;
 
   const area = await execute(
     `INSERT INTO area_protegida (nome, categoria_uc, esfera, geom)
@@ -57,7 +70,7 @@ test('CSV real no MySQL cria eventos e GET os devolve; reimportação preserva a
   const first = await importInpeCsv({
     sourceCode: 'inpe_queimadas_diario_br',
     date: '2024-09-24',
-    file: tempFile,
+    file: inpeFile,
   });
   if (first.executionId) executionIds.push(first.executionId);
   assert.equal(first.inserted, 2);
@@ -89,6 +102,41 @@ test('CSV real no MySQL cria eventos e GET os devolve; reimportação preserva a
     [target.id, areaId]
   );
   assert.equal(areaLink.rows[0]?.tipo_relacao, 'contem_ponto');
+
+  const deterId = `deter_amz.integration-${suffix}_curr`;
+  deterExternalId = deterId;
+  const deterFixture = await readFile(new URL('./fixtures/terrabrasilis_deter_sample.geojson', import.meta.url), 'utf8');
+  const deterFile = join(tmpdir(), `bioguardians-deter-${suffix}.geojson`);
+  tempFiles.push(deterFile);
+  await (await import('node:fs/promises')).writeFile(deterFile, deterFixture.replaceAll('integration-template', `integration-${suffix}`), 'utf8');
+  const deterImport = await importDeterWfs({
+    sourceCode: 'terrabrasilis_deter_amazonia_wfs',
+    since: '2024-09-01',
+    file: deterFile,
+  });
+  if (deterImport.executionId) executionIds.push(deterImport.executionId);
+  assert.equal(deterImport.inserted, 1);
+  assert.equal(deterImport.ignored, 1);
+  assert.equal(deterImport.rejected, 1);
+  const deterEvent = await query<any>(
+    `SELECT id, tipo_evento_codigo, classe_fonte, area_alerta_ha,
+            municipio_codigo_ibge, ST_GeometryType(geom) AS geometry_type,
+            ST_SRID(geom) AS srid
+     FROM monitor_evento WHERE fonte_id = ? AND id_externo = ?`,
+    [deterSourceId, deterId]
+  );
+  assert.equal(deterEvent.rows[0]?.tipo_evento_codigo, 'alerta_deter');
+  assert.equal(deterEvent.rows[0]?.classe_fonte, 'DESMATAMENTO_CR');
+  assert.equal(deterEvent.rows[0]?.geometry_type, 'MULTIPOLYGON');
+  assert.equal(Number(deterEvent.rows[0]?.srid), 4326);
+  assert.ok(Number(deterEvent.rows[0]?.area_alerta_ha) > 0);
+  assert.equal(deterEvent.rows[0]?.municipio_codigo_ibge, '5105622');
+  const deterAreaLink = await query<any>(
+    'SELECT tipo_relacao, intersecao_ha FROM monitor_evento_uc WHERE evento_id = ? AND area_id = ?',
+    [deterEvent.rows[0].id, areaId]
+  );
+  assert.equal(deterAreaLink.rows[0]?.tipo_relacao, 'intersecta_poligono');
+  assert.ok(Number(deterAreaLink.rows[0]?.intersecao_ha) > 0);
 
   const app = express();
   app.use('/api/monitoramento', monitoramentoRoutes);
@@ -131,7 +179,16 @@ test('CSV real no MySQL cria eventos e GET os devolve; reimportação preserva a
   assert.equal(sourcesResponse.status, 200);
   const sourcesPayload = await sourcesResponse.json() as any;
   assert.ok(sourcesPayload.data.some((source: any) => source.codigo === 'inpe_queimadas_diario_br' && source.ativo));
-  assert.ok(sourcesPayload.data.some((source: any) => source.codigo === 'terrabrasilis_deter_wfs' && !source.ativo));
+  assert.ok(sourcesPayload.data.some((source: any) => source.codigo === 'terrabrasilis_deter_amazonia_wfs' && source.ativo && source.camada_wfs === 'deter-amz:deter_amz'));
+  assert.ok(sourcesPayload.data.some((source: any) => source.codigo === 'terrabrasilis_deter_cerrado_wfs' && source.ativo && source.camada_wfs === 'deter-cerrado-nb:deter_cerrado'));
+
+  const deterDetailResponse = await fetch(`${baseUrl}/eventos/${deterEvent.rows[0].id}`);
+  assert.equal(deterDetailResponse.status, 200);
+  const deterDetail = await deterDetailResponse.json() as any;
+  assert.equal(deterDetail.geometry.type, 'MultiPolygon');
+  assert.equal(deterDetail.properties.classe_fonte, 'DESMATAMENTO_CR');
+  assert.equal(deterDetail.atendimento.status, 'novo');
+  assert.match(deterDetail.historico_atendimento[0].observacao, /TerraBrasilis DETER/);
 
   await execute(
     `UPDATE monitor_atendimento
@@ -149,7 +206,7 @@ test('CSV real no MySQL cria eventos e GET os devolve; reimportação preserva a
   const second = await importInpeCsv({
     sourceCode: 'inpe_queimadas_diario_br',
     date: '2024-09-24',
-    file: tempFile,
+    file: inpeFile,
   });
   if (second.executionId) executionIds.push(second.executionId);
   assert.equal(second.inserted, 0);

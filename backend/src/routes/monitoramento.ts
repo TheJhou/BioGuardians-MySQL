@@ -156,7 +156,7 @@ router.get('/fontes', cacheMiddleware(undefined, () => 30_000), async (_req, res
   try {
     const { rows } = await query<any>(
       `SELECT f.id, f.codigo, f.nome, f.orgao, f.produto, f.formato,
-              f.frequencia_minutos, f.ativo,
+              f.camada_wfs, f.crs_origem, f.frequencia_minutos, f.ativo,
               latest.id AS ultima_execucao_id, latest.status AS ultimo_status,
               latest.iniciada_em AS ultima_execucao_em, latest.concluida_em,
               latest.registros_lidos, latest.registros_novos,

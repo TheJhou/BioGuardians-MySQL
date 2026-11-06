@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { parseCsv } from '../src/monitoramento/csv.js';
+import { parseDeterFeatureCollection } from '../src/monitoramento/deterParser.js';
 import { parseInpeCsv } from '../src/monitoramento/inpe.js';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/inpe_focos_sample.csv', import.meta.url));
@@ -41,4 +42,30 @@ test('INPE adapter generates a deterministic key when the source has no ID colum
 
 test('INPE adapter rejects a CSV with unrelated headers', () => {
   assert.throws(() => parseInpeCsv('name,value\na,b\n'), /sem coluna Latitude/);
+});
+
+test('DETER adapter parses polygon GeoJSON, normalizes source fields and rejects invalid geometry', async () => {
+  const fixture = await readFile(new URL('./fixtures/terrabrasilis_deter_sample.geojson', import.meta.url), 'utf8');
+  const refs = {
+    biomas: new Map([['amazonia', 1]]),
+    estados: new Map([['mt', 'MT']]),
+  };
+  const parsed = parseDeterFeatureCollection(
+    fixture,
+    'terrabrasilis_deter_amazonia_wfs',
+    'Avisos DETER Amazônia',
+    refs,
+  );
+
+  assert.equal(parsed.rowsRead, 3);
+  assert.equal(parsed.events.length, 1);
+  assert.equal(parsed.duplicatedInFile, 1);
+  assert.equal(parsed.rejected.geometria_poligonal_invalida, 1);
+  assert.equal(parsed.events[0].tipoEventoCodigo, 'alerta_deter');
+  assert.equal(parsed.events[0].geometry.type, 'MultiPolygon');
+  assert.equal(parsed.events[0].dataObservacao, '2024-09-24 00:00:00');
+  assert.equal(parsed.events[0].municipioCodigoIbge, '5105622');
+  assert.equal(parsed.events[0].estadoUf, 'MT');
+  assert.equal(parsed.events[0].biomaId, 1);
+  assert.equal(parsed.events[0].classeFonte, 'DESMATAMENTO_CR');
 });

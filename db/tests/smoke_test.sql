@@ -250,8 +250,11 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'inpe_queimadas_diario_br' AND formato = 'csv' AND ativo = TRUE) THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - active INPE CSV source missing';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'terrabrasilis_deter_wfs' AND formato = 'wfs' AND ativo = FALSE) THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - DETER source must remain inactive until its layer is confirmed';
+    IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'terrabrasilis_deter_amazonia_wfs' AND formato = 'wfs' AND camada_wfs = 'deter-amz:deter_amz' AND crs_origem = 'EPSG:4674' AND ativo = TRUE) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - public DETER Amazonia WFS source missing';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'terrabrasilis_deter_cerrado_wfs' AND formato = 'wfs' AND camada_wfs = 'deter-cerrado-nb:deter_cerrado' AND crs_origem = 'EPSG:4674' AND ativo = TRUE) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - public DETER Cerrado WFS source missing';
     END IF;
 END $$
 

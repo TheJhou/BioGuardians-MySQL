@@ -1,7 +1,7 @@
 import type { PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { pool, query } from '../db/pool.js';
 import { logger } from '../telemetry/logger.js';
-import { importInpeCsv } from './ingestion.js';
+import { importMonitorSource } from './runner.js';
 
 interface DueSource extends RowDataPacket {
   codigo: string;
@@ -46,13 +46,13 @@ async function runDueSources(): Promise<void> {
         : interval;
       if (source.ultima_execucao && elapsedMinutes(source.ultima_execucao) < requiredInterval) continue;
 
-      if (source.formato !== 'csv' || !source.codigo.startsWith('inpe_')) {
+      if (source.formato !== 'csv' && source.formato !== 'wfs') {
         logger.warn('monitor_source_adapter_unavailable', { source: source.codigo, format: source.formato });
         continue;
       }
 
       try {
-        await importInpeCsv({ sourceCode: source.codigo });
+        await importMonitorSource({ sourceCode: source.codigo });
       } catch (error) {
         logger.error('monitor_source_import_failed', {
           source: source.codigo,
