@@ -227,6 +227,8 @@ A migration `003_monitoramento_ambiental.sql` acrescenta um domínio separado
 para focos de calor do INPE e alertas do DETER. A modelagem detalhada, o
 mapeamento de campos e as decisões de atendimento estão em
 [`ENVIRONMENTAL_MONITORING_MODEL.md`](ENVIRONMENTAL_MONITORING_MODEL.md).
+O fluxo de coleta, os adapters, as rotas GET e as etapas de ativação estão em
+[`ENVIRONMENTAL_MONITORING_INGESTION_PLAN.md`](ENVIRONMENTAL_MONITORING_INGESTION_PLAN.md).
 
 - `monitor_fonte`, `monitor_tipo_evento` e `monitor_execucao` catalogam as
   fontes e rastreiam as coletas.
