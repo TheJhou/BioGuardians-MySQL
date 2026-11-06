@@ -9,7 +9,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "generate-area-tiles": "tsx scripts/generateAreaTiles.ts"
+    "generate-area-tiles": "tsx scripts/generateAreaTiles.ts",
+    "monitor:import": "tsx src/monitoramento/importCli.ts",
+    "test:monitoramento": "tsx --test tests/monitoramento.test.ts",
+    "test:monitoramento:mysql": "tsx --test tests/monitoramento.mysql.integration.test.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",

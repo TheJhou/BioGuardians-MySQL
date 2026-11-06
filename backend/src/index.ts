@@ -14,6 +14,7 @@ import areasRoutes from './routes/areas.js';
 import ocorrenciasRoutes from './routes/ocorrencias.js';
 import dashboardRoutes from './routes/dashboard.js';
 import deteccoesRoutes from './routes/deteccoes.js';
+import monitoramentoRoutes from './routes/monitoramento.js';
 import { warmupTileCache } from './tileWarmup.js';
 
 const app = express();
@@ -35,6 +36,7 @@ app.use('/api/areas', areasRoutes);
 app.use('/api/ocorrencias', ocorrenciasRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/deteccoes', deteccoesRoutes);
+app.use('/api/monitoramento', monitoramentoRoutes);
 
 // --- Error handling ---
 app.use(errorHandler);

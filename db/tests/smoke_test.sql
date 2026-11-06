@@ -35,7 +35,10 @@ BEGIN
           "especie_estado","area_protegida","ocorrencia","ocorrencia_area",
           "log_auditoria","deteccao","deteccao_job","imagem_job","modelo_ml",
           "area_tile","dashboard_stats","especies_por_uc",
-          "ranking_especies_categoria","ucs_por_esfera","schema_migrations"]',
+          "ranking_especies_categoria","ucs_por_esfera","schema_migrations",
+          "monitor_fonte","monitor_tipo_evento","monitor_execucao","monitor_evento",
+          "monitor_prioridade","monitor_atendimento","monitor_atendimento_historico",
+          "monitor_evento_uc"]',
         '$[*]' COLUMNS (name VARCHAR(64) PATH '$')
     ) t
     WHERE NOT EXISTS (
@@ -237,6 +240,24 @@ BEGIN
     END IF;
 END $$
 
+-- ---------- Test 10: Environmental monitoring catalog ----------
+DROP PROCEDURE IF EXISTS smoke_10_monitoring $$
+CREATE PROCEDURE smoke_10_monitoring()
+BEGIN
+    IF (SELECT COUNT(*) FROM monitor_tipo_evento WHERE codigo IN ('foco_calor','alerta_deter')) <> 2 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - environmental event types missing';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'inpe_queimadas_diario_br' AND formato = 'csv' AND ativo = TRUE) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - active INPE CSV source missing';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'terrabrasilis_deter_amazonia_wfs' AND formato = 'wfs' AND camada_wfs = 'deter-amz:deter_amz' AND crs_origem = 'EPSG:4674' AND ativo = TRUE) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - public DETER Amazonia WFS source missing';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM monitor_fonte WHERE codigo = 'terrabrasilis_deter_cerrado_wfs' AND formato = 'wfs' AND camada_wfs = 'deter-cerrado-nb:deter_cerrado' AND crs_origem = 'EPSG:4674' AND ativo = TRUE) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Test 10 failed - public DETER Cerrado WFS source missing';
+    END IF;
+END $$
+
 -- ---------- Test 9: Migration journal ----------
 DROP PROCEDURE IF EXISTS smoke_9_journal $$
 CREATE PROCEDURE smoke_9_journal()
@@ -257,6 +278,7 @@ SELECT 'Test 6: nome_cientifico' AS '';      CALL smoke_6_nome_cientifico();
 SELECT 'Test 7: geometry validation' AS '';  CALL smoke_7_geometry();
 SELECT 'Test 8: spatial + axis order' AS ''; CALL smoke_8_spatial();
 SELECT 'Test 9: migration journal' AS '';    CALL smoke_9_journal();
+SELECT 'Test 10: environmental sources' AS ''; CALL smoke_10_monitoring();
 
 DROP PROCEDURE smoke_1_tables;
 DROP PROCEDURE smoke_2_reference;
@@ -267,5 +289,6 @@ DROP PROCEDURE smoke_6_nome_cientifico;
 DROP PROCEDURE smoke_7_geometry;
 DROP PROCEDURE smoke_8_spatial;
 DROP PROCEDURE smoke_9_journal;
+DROP PROCEDURE smoke_10_monitoring;
 
 SELECT '==> All smoke tests passed!' AS '';

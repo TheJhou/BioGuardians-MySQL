@@ -4,6 +4,7 @@ import HomePage from './pages/HomePage.js';
 import MapPage from './pages/MapPage.js';
 import DashboardPage from './pages/DashboardPage.js';
 import SpeciesPage from './pages/SpeciesPage.js';
+import MonitoramentoPage from './pages/MonitoramentoPage.js';
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="home" element={<HomePage />} />
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="mapa" element={<MapPage />} />
+          <Route path="monitoramento" element={<MonitoramentoPage />} />
           <Route path="especies" element={<SpeciesPage />} />
           <Route path="especies/:id" element={<SpeciesPage />} />
           <Route path="sobre" element={<div className="page-placeholder container">Sobre</div>} />

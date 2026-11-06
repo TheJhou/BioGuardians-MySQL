@@ -60,6 +60,26 @@ jobs:
       - name: Verify migration idempotency
         run: bash db/migrate.sh
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Test environmental source parsers
+        working-directory: backend
+        run: npm run test:monitoramento
+
+      - name: Test environmental import and GET routes against MySQL
+        working-directory: backend
+        env:
+          DATABASE_URL: mysql://bioguard_ci:bioguard_ci@127.0.0.1:3306/bioguardians_ci
+        run: npm run test:monitoramento:mysql
+
   backend-typecheck:
     name: Typecheck backend
     runs-on: ubuntu-latest

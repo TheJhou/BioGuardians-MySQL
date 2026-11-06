@@ -87,6 +87,26 @@ services:
           memory: 2G
           cpus: "2"
 
+  # ---------- Environmental monitoring ingestion worker ----------
+  monitor-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bioguardians-monitor-worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
+      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+    command: ["node", "--import", "./dist/telemetry/instrumentation.js", "dist/monitoramento/workerMain.js"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1"
+
   # ---------- Frontend (React + Vite dev server) ----------
   frontend:
     build:

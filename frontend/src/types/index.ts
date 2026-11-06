@@ -188,6 +188,109 @@ export interface DashboardData {
   especies_mais_ocorrencias: EspecieMaisOcorrencias[];
 }
 
+export type MonitorStatus = 'novo' | 'em_andamento' | 'resolvido';
+
+export interface MonitorEventProperties {
+  tipo: string;
+  fonte: string;
+  fonte_nome: string;
+  data_observacao: string | null;
+  precisao_data: 'instante' | 'dia' | 'desconhecida';
+  bioma: string | null;
+  estado_uf: string | null;
+  municipio: string | null;
+  satelite: string | null;
+  risco_fogo: number | null;
+  frp_mw: number | null;
+  classe_fonte: string | null;
+  area_alerta_ha: number | null;
+  prioridade: 'baixa' | 'media' | 'alta' | 'critica' | null;
+  score_prioridade: number | null;
+  status_atendimento: MonitorStatus | null;
+  municipio_codigo_ibge?: string | null;
+  id_externo?: string;
+  primeira_importacao_em?: string;
+  ultima_vista_em?: string;
+  atualizado_em?: string;
+}
+
+export interface MonitorEventFeature {
+  type: 'Feature';
+  id: number;
+  geometry: { type: string; coordinates: unknown } | null;
+  properties: MonitorEventProperties;
+}
+
+export interface MonitorEventCollection {
+  type: 'FeatureCollection';
+  features: MonitorEventFeature[];
+  total: number;
+  page: number;
+  per_page: number;
+  total_pages: number;
+}
+
+export interface MonitorEventDetail extends MonitorEventFeature {
+  atendimento: {
+    status: MonitorStatus | null;
+    responsavel: string | null;
+    criado_em: string | null;
+    iniciado_em: string | null;
+    resolvido_em: string | null;
+  };
+  prioridade: {
+    versao_algoritmo: string;
+    score_risco: number | null;
+    score_recencia: number | null;
+    score_sensibilidade: number | null;
+    score_final: number;
+    nivel: 'baixa' | 'media' | 'alta' | 'critica';
+  } | null;
+  historico_atendimento: Array<{
+    status_anterior: MonitorStatus | null;
+    status_novo: MonitorStatus;
+    alterado_em: string;
+    ator: string;
+    observacao: string | null;
+  }>;
+  unidades_conservacao: Array<{
+    id: number;
+    nome: string;
+    categoria_uc: string;
+    esfera: string;
+    tipo_relacao: 'contem_ponto' | 'intersecta_poligono';
+    intersecao_ha: number | null;
+  }>;
+}
+
+export interface MonitorSummary {
+  total: number;
+  por_tipo: Record<string, number>;
+  por_status: Record<string, number>;
+  por_prioridade: Record<string, number>;
+  por_bioma: Record<string, number>;
+}
+
+export interface MonitorSource {
+  id: number;
+  codigo: string;
+  nome: string;
+  orgao: string;
+  produto: string;
+  formato: 'csv' | 'wfs';
+  frequencia_minutos: number | null;
+  ativo: boolean | number;
+  ultima_execucao_id: number | null;
+  ultimo_status: string | null;
+  ultima_execucao_em: string | null;
+  concluida_em: string | null;
+  registros_lidos: number | null;
+  registros_novos: number | null;
+  registros_atualizados: number | null;
+  registros_rejeitados: number | null;
+  ultimo_erro: string | null;
+}
+
 // GeoJSON types
 export interface GeoJSONPoint {
   type: 'Point';

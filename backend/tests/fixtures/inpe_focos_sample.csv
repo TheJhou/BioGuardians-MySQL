@@ -1,0 +1,5 @@
+id,lat,lon,data_hora_gmt,satelite,municipio,estado,pais,municipio_id,estado_id,pais_id,numero_dias_sem_chuva,precipitacao,risco_fogo,bioma,frp
+b19636a6-b8b6-37eb-8da0-0d1648486079,-11.233,-53.893,2024/09/24 01:56:10,GOES-16,"MARCELÂNDIA, NORTE",MATO GROSSO,Brasil,5105622,51,33,50.0,0.0,1.0,Amazônia,63.5
+725832b2-3fda-3c04-8ff6-b7983797f211,-15.5,-47.8,2024/09/24 02:02:00,NOAA-20,TESTE,SP,Brasil,3550308,35,33,4,0.2,0.35,Cerrado,12.25
+725832b2-3fda-3c04-8ff6-b7983797f211,-15.5,-47.8,2024/09/24 02:02:00,NOAA-20,TESTE,SP,Brasil,3550308,35,33,4,0.2,0.35,Cerrado,12.25
+bad-coordinate-id,91,-47,2024/09/24 03:00:00,GOES-16,INVALIDO,SP,Brasil,3550308,35,33,1,0,0.5,Mata Atlântica,4
