@@ -1,136 +1,82 @@
-# Cache Persistente de Tiles — `generateAreaTiles.ts`
+# Cache persistente de tiles — `generateAreaTiles.ts`
 
-Documento sobre o script `backend/scripts/generateAreaTiles.ts`, a tabela
-`area_tile` (migration 004) e por que esse mecanismo existe.
+As Unidades de Conservação têm polígonos grandes e com muitos vértices. Para
+evitar repetir o preparo dos tiles em cada consulta, o projeto persiste os tiles
+MVT sem filtros na tabela MySQL `area_tile`.
 
-## O problema que ele resolve
+## Armazenamento
 
-As Unidades de Conservação são polígonos **muito pesados**:
-
-- `area_protegida`: 3.371 geometrias, ~63 MB, média de ~1.100 vértices por
-  polígono
-- As piores chegam a **130 mil vértices** (Flona Itaituba, APA Tamoios etc.)
-
-O endpoint `GET /api/areas/tiles/:z/:x/:y.mvt` gerava cada tile na hora:
-o índice GIST encontrava os polígonos rápido, mas depois o PostGIS precisava
-rodar `ST_Transform` + `ST_SimplifyPreserveTopology` + `ST_AsMVTGeom` sobre
-centenas de polígonos gigantes **a cada requisição**. Em zoom baixo (z3–z5)
-um único tile cobre meio Brasil e intersecta milhares de polígonos — a
-geração fria levava de **1 a 4 segundos por tile**.
-
-Resultado visível: o mapa "nascia" quadrado por quadrado, devagar, porque o
-trabalho de vértice acontecia no request path. CPU e RAM sobrando não
-resolviam — era volume bruto de processamento geométrico repetido para o
-mesmo resultado.
-
-> **Atualização (2026-09-23):** medição em produção mostrou que ~85% desse
-> custo era o `ST_SimplifyPreserveTopology` (tile z4 com 889 UCs e 1,5 mi de
-> vértices: 2.400 ms). A geração agora usa
-> `ST_Transform(ST_Simplify(geom, 360 / (256·2^z), true), 3857)` — simplifica
-> em graus, com tolerância de ~1 pixel, antes de transformar: **64 ms** para o
-> mesmo tile, com tamanho equivalente (23 KB vs 26 KB). Recortar pelo tile
-> antes de simplificar (`ST_ClipByBox2D`) foi testado e quase não ajudou.
-> A tabela `area_tile` continua valendo: o hit é ~0,03 ms.
-
-Como UCs praticamente não mudam (e quando mudam, é uma adição), pagar esse
-custo por requisição não faz sentido.
-
-## A solução
-
-Gerar cada tile **uma única vez** e guardar o binário `.mvt` pronto no
-próprio Postgres:
+A tabela é criada pela migration `001_initial.sql`:
 
 ```sql
 CREATE TABLE area_tile (
     z         SMALLINT    NOT NULL,
-    x         INTEGER     NOT NULL,
-    y         INTEGER     NOT NULL,
-    tile      BYTEA       NOT NULL,
-    gerado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+    x         INT         NOT NULL,
+    y         INT         NOT NULL,
+    tile      MEDIUMBLOB  NOT NULL,
+    gerado_em DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (z, x, y)
 );
 ```
 
-O request passa a ser um `SELECT` de uma linha — **~10–20 ms**, frio ou
-quente, sem depender de cache em memória, sem warm-up de boot e sem
-reprocessar geometria.
+## Geração
 
-## Como o script funciona
-
-`backend/scripts/generateAreaTiles.ts` — executado via tsx, direto no banco
-(sem passar por HTTP nem exigir o servidor rodando):
-
-1. **Descobre o que gerar**: `ST_Extent(geom)` retorna o bounding box real
-   de todas as áreas — só os tiles que cobrem dado entram na fila, não o
-   globo inteiro
-2. **Enumera os tiles** para cada zoom no intervalo (default z3–z6)
-   convertendo o bbox em coordenadas slippy-map x/y
-3. **Gera cada tile** com a mesma query MVT da rota (extraída para
-   `backend/src/tileStore.ts`, usada pelos dois caminhos)
-4. **Persiste com upsert** (`ON CONFLICT DO UPDATE`) — idempotente, pode
-   rodar quantas vezes quiser
-5. Concorrência de 4 workers; erros em tiles individuais são contados mas
-   não abortam a execução
+`backend/scripts/generateAreaTiles.ts` calcula a extensão geográfica das UCs,
+enumera os tiles slippy map nessa extensão e usa `backend/src/tileStore.ts` para
+gerar e gravar cada tile. Por padrão, pré-gera os zooms 3 a 6; os limites podem
+ser passados como argumentos. A geração é idempotente: um upsert substitui o
+tile existente para a chave `(z, x, y)`.
 
 ```bash
-npm run generate-area-tiles          # z3–z6 (default, ~118 tiles, ~10s)
-npm run generate-area-tiles -- 3 8   # z3–z8
+cd backend
+npm run generate-area-tiles          # zooms 3–6
+npm run generate-area-tiles -- 3 8   # zooms 3–8
 ```
 
-Primeira execução real: 118 tiles, 401 KB, 0 erros, ~10 s.
+O MySQL usa o índice espacial para filtrar geometrias pelo envelope do tile e
+aplica `ST_Simplify` antes de devolver GeoJSON. O simplificador do MySQL exige
+SRID cartesiano, por isso a query troca temporariamente o SRID para 0 sem
+alterar as coordenadas longitude/latitude e aplica um fallback para polígonos
+pequenos. A codificação MVT é feita no Node.js (`geojson-vt` + `vt-pbf`); o
+MySQL não fornece `ST_AsMVT`.
 
-## O fluxo completo em runtime
+## Fluxo da API
 
-```
-GET /api/areas/tiles/z/x/y.mvt
-  ├─ sem filtros (esfera/categoria/bioma):
-  │    ├─ SELECT tile FROM area_tile → hit: devolve bytea (~10–20 ms)
-  │    └─ miss: gera na hora + INSERT na tabela → próximo request vira hit
-  │       (self-healing — cobre zooms altos não pré-gerados)
+```text
+GET /api/areas/tiles/:z/:x/:y.mvt
+  ├─ sem filtros (esfera, categoria, bioma):
+  │    ├─ consulta area_tile e devolve o tile persistido
+  │    └─ se não existir, gera no Node.js, grava e devolve
   └─ com filtros:
-       └─ caminho antigo: LRU em memória (1h) + query dinâmica
-          (tiles filtrados são variantes; não vão pra tabela)
+       └─ gera a variante filtrada sob demanda e mantém em cache LRU
 ```
 
-Por que só sem filtro usa a tabela: um tile pré-gerado representa o dataset
-completo. Cada combinação de filtro geraria uma variante diferente do mesmo
-z/x/y — a chave da tabela não comportaria isso sem explodir em cardinalidade.
+Tiles de UCs sem filtro são persistidos; combinações filtradas usam cache em
+memória, pois a chave da tabela não inclui os parâmetros de filtro. A geração
+dinâmica usa a mesma rotina de simplificação e codificação que o script em
+lote.
 
-## Invalidação
+## Atualização dos tiles
 
-A API é somente leitura, então não há invalidação automática: UCs só mudam
-por carga via script (`scripts/data/load_cnuc_ucs.mjs`) ou SQL direto. Depois
-de mudar áreas, re-gere os tiles:
+A API é somente leitura. Depois de inserir ou alterar UCs por um processo de
+carga, regenere os tiles:
 
 ```bash
-npm run generate-area-tiles
+cd backend && npm run generate-area-tiles
 ```
 
-ou, para invalidar tudo manualmente:
+Também é possível apagar os tiles para que sejam reconstruídos sob demanda:
 
 ```sql
-DELETE FROM area_tile;  -- tiles voltam a se gerar sob demanda
+DELETE FROM area_tile;
 ```
-
-## Decisões e trade-offs
-
-- **z3–z6 pré-gerados**: são os zooms caros (tiles grandes, muitos
-  polígonos). z7+ tem poucos polígonos por tile e se auto-popula na primeira
-  requisição — pré-gerar seria desperdício de espaço.
-- **Warm-up de boot reduzido**: `tileWarmup.ts` agora aquece só ocorrências
-  (pontos são leves; áreas não dependem mais de memória).
-- **Dado novo não aparece sozinho**: tiles pré-gerados servem a versão
-  gravada até alguém re-gerar ou apagar a tabela — aceitável porque UCs são
-  estáticas e só mudam por carga via script.
-- **Custo de manutenção**: uma tabela pequena (~500 KB) e um script
-  idempotente — em troca, o pior caso de latência caiu de ~4 s para ~20 ms.
 
 ## Arquivos relacionados
 
 | Arquivo | Papel |
 |---|---|
-| `db/migrations/004_area_tile_cache.sql` | cria a tabela `area_tile` |
-| `backend/src/tileStore.ts` | geração, leitura e upsert |
-| `backend/src/routes/areas.ts` | rota que consulta a tabela e faz miss+upsert |
-| `backend/scripts/generateAreaTiles.ts` | geração em massa (este script) |
-| `backend/src/tileWarmup.ts` | warm-up de boot (só ocorrências agora) |
+| `db/migrations/001_initial.sql` | Cria a tabela `area_tile` |
+| `backend/src/tileStore.ts` | Filtra, simplifica, lê e grava tiles |
+| `backend/src/mvt.ts` | Codifica tiles MVT no Node.js |
+| `backend/src/routes/areas.ts` | Rota de tiles e cache de filtros |
+| `backend/scripts/generateAreaTiles.ts` | Pré-geração em lote |

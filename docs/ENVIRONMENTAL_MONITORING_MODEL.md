@@ -1,10 +1,14 @@
 # Modelagem de monitoramento ambiental
 
-Modelo MySQL para integrar focos de calor do INPE / Programa Queimadas e alertas
-do sistema DETER publicados pelo TerraBrasilis. O schema é aditivo: os alertas
-ambientais não são armazenados como ocorrências de espécies.
+Este domínio reúne focos de calor do INPE / Programa Queimadas e alertas de
+alteração da cobertura vegetal do DETER publicados pelo TerraBrasilis. Ele é
+aditivo: um alerta ambiental não é uma ocorrência de espécie (`ocorrencia`) nem
+uma classificação de imagem (`deteccao`).
 
-Migration correspondente: `db/migrations/003_monitoramento_ambiental.sql`.
+O schema foi criado em `003_monitoramento_ambiental.sql`. A migration
+`004_activate_terrabrasilis_deter.sql` configura e ativa as camadas públicas do
+DETER Amazônia e Cerrado. Consulte também o [dicionário de dados](DATA_DICTIONARY.md)
+e o [ERD](ERD.md).
 
 ## Diagrama
 
@@ -27,110 +31,145 @@ erDiagram
 
 ### `monitor_fonte`
 
-Catálogo dos produtos consultados, não apenas do órgão publicador. Guarda código
-estável, órgão, produto, formato, endpoint, camada WFS, CRS de origem, frequência
-esperada e orientação de atribuição. A fonte DETER é criada inativa até que a
-camada WFS e seu CRS sejam confirmados.
+Catálogo de produtos consultados. Guarda código estável, órgão, formato,
+endpoint, camada WFS quando aplicável, CRS publicado, frequência e instrução de
+atribuição. A migration `003` cria uma fonte DETER genérica inativa; a `004`
+substitui essa entrada pela camada pública de Amazônia e adiciona a fonte do
+Cerrado.
+
+Fontes atualmente ativas:
+
+| Código | Produto e endpoint/camada | Frequência |
+|---|---|---:|
+| `inpe_queimadas_diario_br` | CSV diário do Brasil em `https://dataserver-coids.inpe.br/queimadas/queimadas/focos/csv/diario/Brasil/focos_diario_br_{yyyymmdd}.csv` | 1.440 min |
+| `terrabrasilis_deter_amazonia_wfs` | `https://terrabrasilis.dpi.inpe.br/geoserver/deter-amz/wfs`, camada `deter-amz:deter_amz` | 1.440 min |
+| `terrabrasilis_deter_cerrado_wfs` | `https://terrabrasilis.dpi.inpe.br/geoserver/deter-cerrado-nb/wfs`, camada `deter-cerrado-nb:deter_cerrado` | 1.440 min |
+
+As duas camadas DETER são feeds públicos com atraso aproximado de uma semana.
+O acesso antecipado diário requer credenciais e não é usado por esta integração.
+O [TerraBrasilis](https://terrabrasilis.dpi.inpe.br/) publica os dados e as
+orientações de uso e atribuição.
 
 ### `monitor_tipo_evento`
 
-Referência extensível dos tipos `foco_calor` e `alerta_deter`. O nome alerta
-DETER preserva a distinção entre um alerta de sensoriamento remoto e uma
-confirmação de desmatamento.
+Referência dos tipos `foco_calor` e `alerta_deter`. O nome “alerta DETER” mantém
+a distinção entre um alerta de sensoriamento remoto e a confirmação de
+desmatamento.
 
 ### `monitor_execucao`
 
-Uma linha por tentativa de coleta, com estado (`em_execucao`, `concluida`,
-`parcial` ou `erro`), janela consultada, parâmetros, contagens, checksum do
-arquivo quando aplicável e erro. Cada evento aponta para a última execução que
-o importou; uma chave estrangeira composta garante que fonte do evento e fonte
-da execução sejam iguais.
+Uma linha por tentativa de coleta: fonte, estado (`em_execucao`, `concluida`,
+`parcial` ou `erro`), janela, parâmetros, contagens, checksum SHA-256 e erro.
+Cada evento aponta para sua execução mais recente; uma FK composta garante que
+evento e execução pertençam à mesma fonte.
 
 ### `monitor_evento`
 
-Registro atual de um item publicado por uma fonte. A chave única
-`(fonte_id, id_externo)` torna o carregamento idempotente. O importador deve usar
-o identificador estável da fonte; se não existir, deve produzir e documentar uma
-chave determinística a partir dos atributos de origem.
+Representa o item publicado pela fonte. A chave única `(fonte_id, id_externo)`
+permite reimportação idempotente. `geom` é `GEOMETRY SRID 4326`: ponto para foco
+de calor e polígono/multipolígono para DETER. GeoJSON usa longitude/latitude;
+essa ordem é mantida ao gravar no MySQL. A data original e sua precisão ficam em
+`data_observacao` e `precisao_data`; a carga não inventa a data quando a fonte
+não a fornece.
 
-`geom` é `GEOMETRY SRID 4326` com índice espacial: ponto para foco de calor e
-polígono/multipolígono para alerta DETER. Coordenadas GeoJSON são longitude /
-latitude; a conversão deve ser explícita ao gravar no MySQL. A data da fonte é
-armazenada em UTC. Quando a fonte só informa o dia, usar `precisao_data = 'dia'`;
-quando não informa a data, deixar `data_observacao` nula em vez de substituí-la
-pelo horário da importação.
-
-O vínculo com `bioma` e `estado` usa as referências existentes. Município fica
-como texto e código IBGE opcional, pois ainda não há tabela municipal neste
-schema. Campos comuns ficam em colunas; `propriedades_origem` preserva o JSON
-original para rastreabilidade e remapeamentos futuros.
-
-Campos de fogo: `satelite`, `risco_fogo` e `frp_mw`. Campos de alertas: `classe_fonte`
-e `area_alerta_ha`; o importador converte a unidade publicada para hectares e
-mantém o valor/fator original em `propriedades_origem`.
+`bioma_id` e `estado_uf` reutilizam tabelas existentes. Município e código IBGE
+são opcionais. Os atributos normalizados ficam em colunas e o conjunto de
+atributos publicado fica preservado em `propriedades_origem` (JSON). Os campos
+específicos de fogo são `satelite`, `risco_fogo` e `frp_mw`; para DETER, são
+`classe_fonte` e `area_alerta_ha`.
 
 ### `monitor_prioridade`
 
-Uma linha com a avaliação corrente por evento: componentes de risco, recência e
-sensibilidade, score final, nível e versão do algoritmo. É uma regra interna do
-BioGuardians, não um valor oficial do INPE ou do DETER. A tabela é atualizada
-quando o score é recalculado; os fatos originais permanecem em
-`monitor_evento`.
+Estrutura para guardar uma avaliação de prioridade do BioGuardians: componentes
+de risco, recência e sensibilidade, score final, nível e versão do algoritmo.
+Não é uma avaliação oficial das fontes. O cálculo ainda não está implementado e
+o importador atual não preenche esta tabela; por isso os campos de prioridade
+podem aparecer sem valor na API.
 
 ### `monitor_atendimento` e `monitor_atendimento_historico`
 
-`monitor_atendimento` mantém o estado corrente, inicialmente `novo`, e os
-horários de início e resolução. `monitor_atendimento_historico` é append-only e
-registra status anterior/novo, data, ator e observação. A primeira importação
-deve criar o estado `novo` e seu evento inicial no histórico.
+Todo evento novo recebe o status inicial `novo` e uma linha inicial no histórico,
+com ator `sistema`. Reimportar um evento atualiza os dados publicados sem
+reiniciar o atendimento nem duplicar esse registro inicial.
 
-Transições da primeira versão: `novo → em_andamento → resolvido`. Reimportar um
-evento não altera nem reinicia o atendimento. Cada transição atualiza a linha
-corrente e insere o histórico na mesma transação. O ator deve vir da identidade
-autenticada da API; até existir essa identidade, usar `sistema` para mudanças
-automáticas. Reabertura de evento não está incluída no fluxo de referência.
+O schema também define os valores `em_andamento` e `resolvido`, mas a aplicação
+atual expõe apenas consultas `GET` e não oferece operação para mudar o status.
+Não existe hoje uma transição de atendimento disponível pelo produto; a
+identidade de ator e o fluxo de resolução dependem de uma futura funcionalidade
+de escrita autorizada.
 
 ### `monitor_evento_uc`
 
-Relação espacial muitos-para-muitos com `area_protegida`. Para pontos, a relação
-significa que o foco está contido na UC. Para polígonos, significa interseção;
-`intersecao_ha` pode ficar nula na primeira versão. O vínculo é recalculado pelo
-worker após a ingestão, sem triggers pesados em `area_protegida` ou no evento.
+Relação espacial muitos-para-muitos com `area_protegida`. O importador a
+recalcula para os eventos importados: um ponto é relacionado à UC que o contém;
+um polígono, às UCs que intersecta. Para interseções poligonais, o banco calcula
+`intersecao_ha` a partir da geometria de interseção; para pontos o campo fica
+nulo. O processo ocorre na ingestão, sem triggers espaciais em cada leitura.
 
 ## Mapeamento das fontes
 
 ### INPE / Programa Queimadas
 
-O CSV diário do Brasil alimenta eventos `foco_calor`. Mapear horário, satélite,
-bioma, estado, município, latitude, longitude, risco de fogo e FRP. O parser
-deve aceitar os nomes exatos da versão do CSV configurada, pois a documentação
-e o código de referência usam cabeçalhos diferentes. Se o requisito exigir
-atualização em intervalos de 10 minutos, cadastrar o produto correspondente do
-INPE; não configurar o CSV diário como se fosse um feed de 10 minutos.
+O CSV diário do Brasil alimenta eventos `foco_calor`. O importador reconhece
+variações de cabeçalho para data/hora, latitude, longitude, município, código
+IBGE, estado, bioma, satélite, risco de fogo e FRP. Quando o registro contém um
+identificador de origem, ele é usado como `id_externo`; quando não contém, o
+importador cria um SHA-256 determinístico dos atributos de identificação.
+Coordenadas inválidas e datas malformadas são contabilizadas como rejeições.
+Esse produto tem frequência diária; não representa um feed de atualização a
+cada 10 minutos.
 
 ### TerraBrasilis / DETER
 
-Antes de ativar a fonte, consultar `GetCapabilities` e `DescribeFeatureType`,
-definir uma camada explícita, verificar campos, paginação, intervalo temporal e
-CRS. Guardar o identificador da feição, a data e a classe publicada e preservar
-a geometria completa. Não extrair apenas o primeiro vértice de um polígono nem
-inventar a data do alerta quando ela estiver ausente.
+As fontes ativas são os WFS públicos `deter-amz:deter_amz` e
+`deter-cerrado-nb:deter_cerrado`. A migration registra CRS de origem EPSG:4674;
+as consultas pedem GeoJSON em EPSG:4326, e o parser rejeita resposta em CRS não
+suportado. A geometria Polygon/MultiPolygon completa é preservada.
 
-## Regras operacionais de integração
+O importador usa `view_date` como data de observação, `classname` como classe,
+`gid`/ID da feature como identificador, e os campos disponíveis de estado,
+município, código municipal e satélite. A área do alerta é calculada em hectares
+a partir da geometria. Os atributos originais ficam no JSON da feature.
 
-- O worker grava os eventos e atualiza `ultima_execucao_id` e `ultima_vista_em`.
-- Upserts nunca escrevem em `monitor_atendimento` nem em seu histórico.
-- A API de leitura pode expor alertas, prioridades, status e histórico por GET.
-- Alterar status exige uma rota de escrita autenticada e autorização do ator; a
-  API atual do BioGuardians é somente GET.
-- A camada DETER permanece inativa no catálogo até seus metadados terem sido
-  verificados. O endpoint é público, mas acesso e atribuição precisam seguir as
-  condições publicadas pelo TerraBrasilis.
+As consultas WFS filtram feições correntes (`gid` terminado em `curr`) a partir
+da data inicial solicitada. A janela padrão é de 30 dias, as páginas têm até 500
+feições, e a coleta usa checksum do conteúdo recebido. A paginação e a chave
+externa tornam seguro repetir a importação da janela.
 
-## Objetos existentes reutilizados
+## Execução da ingestão
 
-- `bioma` e `estado` normalizam localizações.
-- `area_protegida` fornece os limites das UCs.
+O CLI fica em `backend/`:
+
+```bash
+npm run monitor:import -- --source inpe_queimadas_diario_br --date YYYY-MM-DD
+npm run monitor:import -- --source terrabrasilis_deter_amazonia_wfs --since YYYY-MM-DD
+npm run monitor:import -- --source terrabrasilis_deter_cerrado_wfs --janela-dias 30 --dry-run
+```
+
+CSV aceita `--date`; WFS aceita `--since` ou `--janela-dias`. Ambas as fontes
+aceitam `--limit`, `--file` e `--dry-run` conforme o formato. O serviço
+`monitor-worker`, no Docker Compose de desenvolvimento, verifica o catálogo a
+cada minuto, mas coleta cada fonte somente quando o intervalo configurado vence.
+Um lock nomeado do MySQL evita dois workers ativos ao mesmo tempo.
+
+## API
+
+A API de monitoramento é somente leitura:
+
+| Rota | Uso |
+|---|---|
+| `GET /api/monitoramento/eventos` | Lista GeoJSON com filtros por tipo, fonte, bioma, estado, data, status, prioridade e bbox |
+| `GET /api/monitoramento/eventos/:id` | Detalhe, histórico inicial e UCs intersectadas |
+| `GET /api/monitoramento/resumo` | Totais por tipo, status, prioridade e bioma |
+| `GET /api/monitoramento/fontes` | Catálogo e resultado da última execução |
+| `GET /api/monitoramento/execucoes/:id` | Resultado e contagens de uma execução |
+
+Não há `POST`, `PUT` ou `DELETE` nessas rotas. As rotas não alteram eventos nem
+status de atendimento.
+
+## Objetos reutilizados
+
+- `bioma` e `estado` normalizam a localização quando a fonte tem esses dados.
+- `area_protegida` fornece os limites das Unidades de Conservação.
 - `ocorrencia` e `ocorrencia_area` continuam reservadas a registros de espécies.
-- `deteccao` continua reservada a resultados do serviço de classificação de
-  imagens.
+- `deteccao` continua reservada às classificações de imagens.

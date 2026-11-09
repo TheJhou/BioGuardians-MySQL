@@ -2,9 +2,9 @@
 
 > Banco de Dados para Gestão de Biodiversidade e Espécies Ameaçadas
 
-Sistema de banco de dados espacial (PostgreSQL + PostGIS) para gestão de
-espécies ameaçadas e áreas protegidas no Brasil, com uma aplicação web simples
-(Node.js + React + MapTiler Cloud) como interface de demonstração do banco.
+Sistema de banco de dados espacial em **MySQL 8.4** para gestão de espécies
+ameaçadas, áreas protegidas e dados de monitoramento ambiental no Brasil, com
+API Node.js e aplicação web React.
 
 ---
 
@@ -14,12 +14,12 @@ espécies ameaçadas e áreas protegidas no Brasil, com uma aplicação web simp
 - **Tema**: Gestão de biodiversidade e espécies ameaçadas (tema bio sustentável)
 - **Foco**: Banco de dados (modelagem, persistência, consultas, integridade).
   A aplicação web é uma camada fina de demonstração.
-- **Stack**: PostgreSQL 16 + PostGIS 3.4, Node.js 22 + Express 5, React 19, Vite, MapLibre, MapTiler Cloud, Chart.js, OpenTelemetry, Grafana; ML service em Python (FastAPI + OpenRouter) rodando localmente
+- **Stack atual**: MySQL 8.4, Node.js 22 + Express 5, React 19, Vite, MapLibre, MapTiler Cloud, Chart.js e OpenTelemetry; ML service em Python (FastAPI) local
 - **Recorte geográfico**: Brasil
 - **Abordagem de dados**: Híbrida (carga inicial estática + consulta em tempo
   real ao GBIF)
-- **Profundidade do BD**: Completo (triggers, views materializadas, funções
-  PL/pgSQL), possivelmente avançado (3FN + EXPLAIN).
+- **Profundidade do BD**: triggers, stored procedure, tabelas agregadas,
+  índices espaciais MySQL e constraints.
 
 ## 2. Problema que a Aplicação Resolve
 
@@ -50,7 +50,7 @@ geográficos com dados de espécies.
 
 ### O que a aplicação faz para resolver
 
-- Integra num único banco (PostgreSQL/PostGIS) os dados de espécies ameaçadas +
+- Integra no banco MySQL espacial os dados de espécies ameaçadas +
   áreas protegidas + ocorrências
 - Permite consultas espaciais nativas ("quais espécies dentro desta UC?",
   "esta ocorrência está dentro de uma área protegida?")
@@ -64,7 +64,7 @@ geográficos com dados de espécies.
 > "A aplicação resolve o problema da fragmentação e dificuldade de consulta dos
 > dados de biodiversidade brasileiros. Hoje, cruzar espécies ameaçadas com áreas
 > protegidas exige ferramentas técnicas de GIS e múltiplas fontes. Nosso sistema
-> integra esses dados num banco espacial (PostGIS) e oferece uma interface de
+> integra esses dados num banco espacial MySQL e oferece uma interface de
 > mapa simples, permitindo que gestores, pesquisadores e o público respondam a
 > perguntas como *quais espécies ameaçadas esta Unidade de Conservação protege?*
 > em segundos."
@@ -95,22 +95,24 @@ geográficos com dados de espécies.
 
 - Cadastro de espécies com taxonomia, categoria de ameaça (MMA/IUCN), bioma(s)
   e estado(s) de ocorrência
-- Cadastro de áreas protegidas (UCs) com geometria georreferenciada (PostGIS)
+- Cadastro de áreas protegidas (UCs) com geometrias georreferenciadas SRID 4326
 - Registro de ocorrências de espécies (ponto lat/long), vindas do GBIF em tempo
   real ou importadas
 - Consultas espaciais: quais espécies ameaçadas ocorrem dentro de uma UC? qual
   UC protege a espécie X?
-- Consultas analíticas (views materializadas): ranking de espécies por
+- Consultas analíticas para ranking de espécies por
   categoria, por bioma, por estado; UCs por categoria/esfera
 - Integridade referencial e constraints (categoria válida, bioma válido,
   geometria válida)
 - Triggers para auditoria (log de alterações) e validações automáticas
-- Índices espaciais (GIST) e convencionais para performance
-- Interface web de demonstração: 4 páginas principais
+- Índices espaciais nativos do MySQL e índices convencionais para performance
+- Interface web de demonstração: páginas principais de biodiversidade,
+  dashboard, mapa, espécies e monitoramento
   - **Home**: apresentação do projeto, destaques e fontes
-  - **Dashboard**: estatísticas das views materializadas com gráficos
+  - **Dashboard**: estatísticas agregadas em tabelas atualizadas pela procedure
   - **Mapa**: MapLibre + MapTiler Cloud com polígonos das UCs, filtros e legenda
   - **Espécies**: lista com scroll infinito (15 em 15) e detalhe com resumo da espécie
+  - **Monitoramento**: focos de calor e alertas DETER com filtros e detalhes
 - Responsivo: navegação mobile com bottom nav, layouts adaptáveis
 - Enriquecimento de resumos: Wikipedia (PT/EN), Wikidata, iNaturalist e EOL
 - Enriquecimento de imagens: iNaturalist, Wikimedia Commons (via Wikidata) e Wikipedia
@@ -139,16 +141,16 @@ geográficos com dados de espécies.
         │ scripts Node em scripts/data (CSV, shapefile, APIs)
         ▼
 ┌─────────────────────────────────────────────────────────────┐
-│         PostgreSQL + PostGIS  (núcleo do projeto)           │
+│                 MySQL 8.4 (núcleo do projeto)               │
 │                                                             │
 │  Tabelas: especie, area_protegida, ocorrencia,              │
 │           ocorrencia_area, bioma, estado, categoria_ameaca, │
 │           taxon, log_auditoria, area_tile (+ tabelas de ML) │
-│  Views materializadas: dashboard_stats, especies_por_uc,    │
+│  Tabelas agregadas: dashboard_stats, especies_por_uc,       │
 │           ranking_especies_categoria, ucs_por_esfera        │
 │  Triggers: auditoria, validação de geometria, sync          │
 │           lat/lon↔geom, ocorrencia_area, cache              │
-│  Índices: GIST (geometria), GIN (FTS), B-tree               │
+│  Índices: espaciais nativos, B-tree                         │
 └───────────┬─────────────────────────────────────────────────┘
 
         │ SQL / queries parametrizadas
@@ -170,7 +172,7 @@ geográficos com dados de espécies.
 │         React + MapTiler Cloud (interface de demo)          │
 │  - Mapa com polígonos das UCs e ocorrências (tiles MVT)     │
 │  - Filtros (esfera, categoria, bioma, espécie)              │
-│  - Dashboard com gráficos (stats das views)                 │
+│  - Dashboard com gráficos (stats agregadas no MySQL)         │
 │  - Lista e detalhe de espécies                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -178,8 +180,8 @@ geográficos com dados de espécies.
 ### Fluxo de uso típico
 
 1. Usuário abre o mapa → MapLibre pede `GET /api/areas/tiles/{z}/{x}/{y}.mvt` →
-   a API devolve o tile pré-gerado da tabela `area_tile` (ou gera com
-   `ST_AsMVT` e grava) → o mapa desenha os polígonos sobre o basemap MapTiler
+   a API devolve o tile pré-gerado da tabela `area_tile` (ou monta GeoJSON e
+   codifica o MVT no Node.js) → o mapa desenha os polígonos sobre o basemap MapTiler
 2. Usuário filtra "espécies criticamente ameaçadas (CR)" →
    `GET /api/especies?categoria=CR` → API roda query com JOIN → retorna lista
 3. Usuário escolhe uma espécie → tiles de ocorrências filtrados por espécie →
@@ -212,34 +214,44 @@ geográficos com dados de espécies.
 
 ### Recursos de BD a destacar na avaliação
 
-- **PostGIS**: colunas `geometry`, `ST_Contains`, `ST_Within`, `ST_AsGeoJSON`,
-  índice GIST
-- **Views materializadas** para o dashboard (refresh sob demanda)
+- **MySQL espacial**: colunas `GEOMETRY SRID 4326`, funções espaciais,
+  GeoJSON e índices espaciais
+- **Agregados de dashboard** em tabelas comuns, atualizadas por
+  `CALL refresh_dashboard()`
 - **Triggers** de auditoria (AFTER INSERT/UPDATE/DELETE)
 - **Constraints**: CHECK em categoria, UNIQUE em nome_cientifico, FKs com
   ON DELETE RESTRICT/CASCADE
 - **Enums ou domínios** para categoria_ameaca e esfera
-- **Índices** em colunas de busca frequente (nome_cientifico, categoria, geom)
+- **Índices** em colunas de busca frequente (nome científico, categoria e
+  geometria)
 
 ### Extensão: monitoramento ambiental
 
-A migration `003_monitoramento_ambiental.sql` acrescenta um domínio separado
-para focos de calor do INPE e alertas do DETER. A modelagem detalhada, o
-mapeamento de campos e as decisões de atendimento estão em
+A modelagem foi implementada nas migrations `003_monitoramento_ambiental.sql` e
+`004_activate_terrabrasilis_deter.sql`. Ela cria um domínio separado para focos
+de calor do INPE e alertas públicos do DETER. O modelo, o mapeamento dos campos
+e os limites atuais de atendimento estão em
 [`ENVIRONMENTAL_MONITORING_MODEL.md`](ENVIRONMENTAL_MONITORING_MODEL.md).
 
 - `monitor_fonte`, `monitor_tipo_evento` e `monitor_execucao` catalogam as
   fontes e rastreiam as coletas.
 - `monitor_evento` guarda os dados de origem e a geometria SRID 4326, sem
   misturar alertas ambientais com observações de espécies.
-- `monitor_prioridade` guarda o score calculado pelo projeto e a versão da
-  regra.
+- `monitor_prioridade` está reservada para o score do projeto e a versão da
+  regra; o cálculo ainda não está implementado.
 - `monitor_atendimento` guarda o status corrente (`novo`, `em_andamento`,
-  `resolvido`) e `monitor_atendimento_historico` registra cada transição.
-- `monitor_evento_uc` relaciona alertas às UCs por interseção espacial.
+  `resolvido`) e `monitor_atendimento_historico` registra a entrada inicial
+  criada durante a ingestão. A API atual não oferece transições de status.
+- `monitor_evento_uc` relaciona eventos às UCs por contenção ou interseção
+  espacial.
 
-Esta migration cria o schema. Os carregadores das fontes, as rotas da API e a
-interface de atendimento são etapas de integração posteriores.
+O backend importa o CSV diário de focos de calor do INPE e os WFS públicos DETER
+Amazônia e Cerrado. O serviço `monitor-worker` agenda coletas segundo a
+frequência do catálogo; o CLI permite cargas manuais e simulação com `--dry-run`.
+A API e a página `/monitoramento` consultam eventos, resumo, fontes e execuções.
+Todas as rotas permanecem somente GET; não há fluxo de alteração de status.
+`monitor_prioridade` está no schema, mas o cálculo de prioridade ainda não foi
+implementado.
 
 ## 7. Fontes de Dados
 
@@ -253,3 +265,10 @@ interface de atendimento são etapas de integração posteriores.
 | IUCN Red List (via GBIF) | API REST | Categoria global IUCN | Validação de categorias (`validate_categories.mjs`) |
 | Wikipedia, Wikidata, iNaturalist, EOL, Wikimedia Commons | API REST | Resumos e imagens | Enriquecimento |
 | Wildlife Insights | CSV + imagens | Fotos de camera trap | Entrada do ML service |
+| INPE / Programa Queimadas | CSV diário | Focos de calor do Brasil | Importador MySQL `inpe_queimadas_diario_br` |
+| TerraBrasilis / DETER Amazônia | WFS GeoJSON, EPSG:4674 → 4326 | Alertas poligonais públicos, com atraso aproximado de uma semana | Importador MySQL `terrabrasilis_deter_amazonia_wfs` |
+| TerraBrasilis / DETER Cerrado | WFS GeoJSON, EPSG:4674 → 4326 | Alertas poligonais públicos, com atraso aproximado de uma semana | Importador MySQL `terrabrasilis_deter_cerrado_wfs` |
+
+Os importadores ambientais acima e o `monitor-worker` já usam o backend MySQL.
+Os demais scripts de `scripts/data/` e o ML service ainda precisam ser portados
+do PostgreSQL antes de rodarem contra o banco atual.
