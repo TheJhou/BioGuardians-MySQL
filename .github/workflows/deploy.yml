@@ -3,9 +3,6 @@ name: Deploy
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - ".gitignore"
   workflow_dispatch:
 
 concurrency:
@@ -127,8 +124,21 @@ jobs:
             echo EOF
           } >> "$GITHUB_OUTPUT"
 
+      - name: Check for an existing latest image
+        if: ${{ !matrix.should_build }}
+        id: existing-image
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          if docker pull "$IMAGE-$SERVICE:latest" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push ${{ matrix.service }} image
-        if: ${{ matrix.should_build }}
+        if: ${{ matrix.should_build || steps.existing-image.outputs.exists != 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
@@ -142,13 +152,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Tag unchanged image with this release
-        if: ${{ !matrix.should_build }}
+        if: ${{ !matrix.should_build && steps.existing-image.outputs.exists == 'true' }}
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           TAG: ${{ needs.prepare.outputs.tag }}
           SERVICE: ${{ matrix.service }}
         run: |
-          docker pull "$IMAGE-$SERVICE:latest"
           docker tag "$IMAGE-$SERVICE:latest" "$IMAGE-$SERVICE:$TAG"
           docker push "$IMAGE-$SERVICE:$TAG"
 
