@@ -240,13 +240,17 @@ export async function persistBatch(sourceId: number, executionId: number, events
       }
 
       await conn.query('DELETE FROM monitor_evento_uc WHERE evento_id IN (?)', [eventIds]);
+      // Sem STRAIGHT_JOIN + FORCE INDEX o otimizador lê area_protegida inteira
+      // (type=ALL, hash join) e testa cada UC contra cada evento: um lote de 200
+      // focos passava de 5 min em produção. Assim o índice espacial filtra as
+      // UCs candidatas por evento (~4 s por lote, mesmo resultado).
       await conn.query(
         `INSERT INTO monitor_evento_uc (evento_id, area_id, tipo_relacao, intersecao_ha)
          SELECT e.id, a.id,
                 CASE WHEN ST_GeometryType(e.geom) = 'POINT' THEN 'contem_ponto' ELSE 'intersecta_poligono' END,
                 CASE WHEN ST_GeometryType(e.geom) = 'POINT' THEN NULL ELSE ST_Area(ST_Intersection(a.geom, e.geom)) / 10000 END
          FROM monitor_evento e
-         JOIN area_protegida a
+         STRAIGHT_JOIN area_protegida a FORCE INDEX (idx_area_protegida_geom)
            ON MBRIntersects(a.geom, e.geom)
           AND ((ST_GeometryType(e.geom) = 'POINT' AND ST_Contains(a.geom, e.geom))
                OR (ST_GeometryType(e.geom) <> 'POINT' AND ST_Intersects(a.geom, e.geom)))
