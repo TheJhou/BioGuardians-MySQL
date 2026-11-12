@@ -16,9 +16,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  REGISTRY: ghcr.io
-
 jobs:
   prepare:
     name: Prepare
@@ -26,7 +23,8 @@ jobs:
     outputs:
       image: ${{ steps.vars.outputs.image }}
       tag: ${{ steps.vars.outputs.tag }}
-      matrix: ${{ steps.matrix.outputs.matrix }}
+      backend_changed: ${{ steps.changes.outputs.backend }}
+      frontend_changed: ${{ steps.changes.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,31 +72,13 @@ jobs:
           done
           echo "Validated $previous sequential migrations."
 
-      - name: Build matrix
-        id: matrix
-        env:
-          BACKEND_CHANGED: ${{ steps.changes.outputs.backend }}
-          FRONTEND_CHANGED: ${{ steps.changes.outputs.frontend }}
-        run: |
-          matrix=$(jq -cn \
-            --argjson frontend "$FRONTEND_CHANGED" \
-            --argjson backend "$BACKEND_CHANGED" '[
-              {"service":"frontend","context":"./frontend","dockerfile":"frontend/Dockerfile","should_build":$frontend},
-              {"service":"backend","context":"./backend","dockerfile":"backend/Dockerfile","should_build":$backend}
-            ]')
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-
-  build:
-    name: Build ${{ matrix.service }}
+  build-backend:
+    name: Build backend
     runs-on: ubuntu-latest
     needs: prepare
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -110,8 +90,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare frontend build args
-        if: ${{ matrix.service == 'frontend' }}
+      - name: Build and push backend image
+        if: ${{ needs.prepare.outputs.backend_changed == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ needs.prepare.outputs.image }}-backend:${{ needs.prepare.outputs.tag }}
+            ${{ needs.prepare.outputs.image }}-backend:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Tag unchanged backend image with this release
+        if: ${{ needs.prepare.outputs.backend_changed != 'true' }}
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          docker pull "$IMAGE-backend:latest"
+          docker tag "$IMAGE-backend:latest" "$IMAGE-backend:$TAG"
+          docker push "$IMAGE-backend:$TAG"
+
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare frontend build arguments
+        if: ${{ needs.prepare.outputs.frontend_changed == 'true' }}
         id: frontend-args
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || '/api' }}
@@ -128,39 +149,37 @@ jobs:
             echo EOF
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push changed image
-        if: ${{ matrix.should_build }}
+      - name: Build and push frontend image
+        if: ${{ needs.prepare.outputs.frontend_changed == 'true' }}
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: ./frontend
+          file: frontend/Dockerfile
           push: true
           build-args: ${{ steps.frontend-args.outputs.value }}
           tags: |
-            ${{ needs.prepare.outputs.image }}-${{ matrix.service }}:${{ needs.prepare.outputs.tag }}
-            ${{ needs.prepare.outputs.image }}-${{ matrix.service }}:latest
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+            ${{ needs.prepare.outputs.image }}-frontend:${{ needs.prepare.outputs.tag }}
+            ${{ needs.prepare.outputs.image }}-frontend:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
-      - name: Tag unchanged image with this release
-        if: ${{ !matrix.should_build }}
+      - name: Tag unchanged frontend image with this release
+        if: ${{ needs.prepare.outputs.frontend_changed != 'true' }}
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           TAG: ${{ needs.prepare.outputs.tag }}
-          SERVICE: ${{ matrix.service }}
         run: |
-          docker pull "$IMAGE-$SERVICE:latest"
-          docker tag "$IMAGE-$SERVICE:latest" "$IMAGE-$SERVICE:$TAG"
-          docker push "$IMAGE-$SERVICE:$TAG"
+          docker pull "$IMAGE-frontend:latest"
+          docker tag "$IMAGE-frontend:latest" "$IMAGE-frontend:$TAG"
+          docker push "$IMAGE-frontend:$TAG"
 
-  deploy:
-    name: Deploy to EC2
+  migrations:
+    name: MySQL migrations
     runs-on: ubuntu-latest
-    needs: [prepare, build]
+    needs: [prepare, build-backend, build-frontend]
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
-      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -199,9 +218,8 @@ jobs:
           if not re.fullmatch(r"https?://[^\s$]+", frontend_url) or frontend_url.endswith("/"):
               sys.exit("FRONTEND_URL must be an http:// or https:// origin without a trailing slash.")
 
-          names = required
           with open("deploy.env", "w", encoding="utf-8") as env_file:
-              for name in names:
+              for name in required:
                   env_file.write(f"{name}={os.environ[name]}\n")
               env_file.write("DB_POOL_MAX=10\nCACHE_MAX=100\nCACHE_TTL_MS=30000\n")
           os.chmod("deploy.env", 0o600)
@@ -244,6 +262,54 @@ jobs:
             infra/nginx/bioguardians-ec2.conf \
             "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/infra/nginx/"
 
+      - name: Start MySQL on EC2
+        env:
+          EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
+          EC2_SSH_USER: ${{ secrets.EC2_SSH_USER || 'ubuntu' }}
+          EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT || '22' }}
+        run: |
+          ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
+            "$EC2_SSH_USER@$EC2_SSH_HOST" \
+            'chmod 600 ~/bioguardians/deploy.env && \
+             mv ~/bioguardians/deploy.env ~/bioguardians/.env && \
+             cd ~/bioguardians && \
+             sudo docker compose --env-file .env -f stack.yml up -d db'
+
+      - name: Apply MySQL migrations
+        env:
+          EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
+          EC2_SSH_USER: ${{ secrets.EC2_SSH_USER || 'ubuntu' }}
+          EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT || '22' }}
+        run: |
+          ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
+            "$EC2_SSH_USER@$EC2_SSH_HOST" \
+            'cd ~/bioguardians && \
+             sudo docker compose --env-file .env -f stack.yml run --rm migrate'
+
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: [prepare, build-backend, build-frontend, migrations]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
+          EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT || '22' }}
+        run: |
+          [ -n "$EC2_SSH_KEY" ] || { echo "Missing secret EC2_SSH_KEY"; exit 1; }
+          [ -n "$EC2_SSH_HOST" ] || { echo "Missing secret EC2_SSH_HOST"; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > "$RUNNER_TEMP/ec2_deploy_key"
+          chmod 600 "$RUNNER_TEMP/ec2_deploy_key"
+          ssh-keyscan -p "$EC2_SSH_PORT" -H "$EC2_SSH_HOST" >> ~/.ssh/known_hosts
+
       - name: Deploy containers and configure host Nginx
         env:
           EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
@@ -265,17 +331,7 @@ jobs:
           }
           trap cleanup_deploy EXIT
           ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
-            "$EC2_SSH_USER@$EC2_SSH_HOST" \
-            "sudo install -d -m 0700 '$auth_dir'"
-
-          ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
-            "$EC2_SSH_USER@$EC2_SSH_HOST" \
-            'chmod 600 ~/bioguardians/deploy.env && \
-             mv ~/bioguardians/deploy.env ~/bioguardians/.env && \
-             sudo install -m 0644 ~/bioguardians/infra/nginx/bioguardians-ec2.conf /etc/nginx/sites-available/bioguardians && \
-             sudo rm -f /etc/nginx/sites-enabled/default && \
-             sudo ln -sfn /etc/nginx/sites-available/bioguardians /etc/nginx/sites-enabled/bioguardians && \
-             sudo nginx -t && sudo systemctl reload nginx'
+            "$EC2_SSH_USER@$EC2_SSH_HOST" "sudo install -d -m 0700 '$auth_dir'"
 
           if [ -n "$GHCR_READ_TOKEN" ]; then
             printf '%s' "$GHCR_READ_TOKEN" | ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
@@ -285,10 +341,12 @@ jobs:
 
           ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
             "$EC2_SSH_USER@$EC2_SSH_HOST" \
-            'cd ~/bioguardians && \
+            'sudo install -m 0644 ~/bioguardians/infra/nginx/bioguardians-ec2.conf /etc/nginx/sites-available/bioguardians && \
+             sudo rm -f /etc/nginx/sites-enabled/default && \
+             sudo ln -sfn /etc/nginx/sites-available/bioguardians /etc/nginx/sites-enabled/bioguardians && \
+             sudo nginx -t && sudo systemctl reload nginx && \
+             cd ~/bioguardians && \
              sudo docker --config '"$auth_dir"' compose --env-file .env -f stack.yml pull backend frontend && \
-             sudo docker --config '"$auth_dir"' compose --env-file .env -f stack.yml up -d db && \
-             sudo docker --config '"$auth_dir"' compose --env-file .env -f stack.yml run --rm migrate && \
              sudo docker --config '"$auth_dir"' compose --env-file .env -f stack.yml up -d backend frontend'
 
           if [ -n "$GHCR_READ_TOKEN" ]; then
