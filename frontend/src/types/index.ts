@@ -225,6 +225,8 @@ export interface MonitorEventCollection {
   type: 'FeatureCollection';
   features: MonitorEventFeature[];
   total: number;
+  /** true quando há mais eventos do que a API conta (a API para em 10.000). */
+  total_limitado?: boolean;
   page: number;
   per_page: number;
   total_pages: number;
@@ -269,6 +271,8 @@ export interface MonitorSummary {
   por_status: Record<string, number>;
   por_prioridade: Record<string, number>;
   por_bioma: Record<string, number>;
+  /** Quando os agregados sem filtro foram recalculados (fim da última importação). */
+  atualizado_em?: string | null;
 }
 
 export interface MonitorSource {

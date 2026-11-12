@@ -45,6 +45,9 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 ### Migrations existentes
 1. `001_initial.sql` — schema MySQL consolidado, equivalente ao estado final das antigas migrations PostgreSQL 001–005 (que ficam no histórico do git): tabelas, índices espaciais, triggers, procedure `refresh_dashboard()`, tabelas de agregados do dashboard e dados de referência (categorias, biomas, estados)
 2. `002_planar_geom_validation.sql` — os triggers de `area_protegida` validam a geometria no plano (`ST_IsValid(ST_SRID(geom, 0))`, mesmo critério do PostGIS). Em SRID 4326 o MySQL valida no elipsoide e recusava 94 das 3.371 UCs de produção
+3. `003_monitoramento_ambiental.sql` — tabelas `monitor_*` (focos INPE, alertas DETER, ligação evento↔UC, atendimento, prioridade)
+4. `004_activate_terrabrasilis_deter.sql` — ativa as fontes DETER Amazônia e Cerrado (WFS TerraBrasilis)
+5. `005_monitor_performance.sql` — índices por data em `monitor_evento` e `monitor_resumo` (linha única com os KPIs), recalculada por `CALL refresh_monitor_resumo()`
 
 ## Comandos úteis
 - Subir banco (Docker): `docker compose up -d db`
@@ -107,6 +110,7 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 - Envelope/bbox em WKT sempre com `ST_GeomFromText(?, 4326, 'axis-order=long-lat')` (`ENVELOPE_SQL`); para pontos, o recorte exato é `BETWEEN` em `lat`/`lon`
 - Proxy ML (somente leitura): `GET /api/deteccoes/jobs`, `GET /api/deteccoes/jobs/:id` → `ML_SERVICE_URL` (default `http://localhost:8001`); só funciona com o ML service rodando
 - Cache LRU em memória (`CACHE_TTL_MS`, `CACHE_MAX`) com TTL por rota; sem invalidação ativa (a API não escreve)
+- Monitoramento: `GET /api/monitoramento/resumo` sem filtros lê `monitor_resumo` (recalculada em `finishExecution` ao fim de cada importação, não a cada request). `GET /eventos` conta e pagina até 10.000 eventos (`total_limitado`); acima disso, filtre
 - OpenTelemetry condicional (só ativa com `OTEL_EXPORTER_OTLP_ENDPOINT`)
 - Sem testes automatizados; o CI roda apenas `tsc --noEmit`
 

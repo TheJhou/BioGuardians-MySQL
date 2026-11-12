@@ -22,6 +22,10 @@ function formatDate(value: string | null): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('pt-BR');
 }
 
+function formatCount(value: number): string {
+  return value.toLocaleString('pt-BR');
+}
+
 function statusClass(status: string | null): string {
   return status ? `monitor-status monitor-status--${status}` : 'monitor-status monitor-status--unknown';
 }
@@ -115,22 +119,21 @@ export default function MonitoramentoPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Fontes e KPIs não dependem dos filtros nem da página: uma chamada só, na
+  // montagem. O resumo vem pré-calculado da última importação (monitor_resumo).
   useEffect(() => {
     api.getMonitoramentoFontes().then((result) => setSources(result.data)).catch(() => setSources([]));
+    api.getMonitoramentoResumo().then(setSummary).catch(() => setSummary(null));
   }, []);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError('');
-    Promise.all([
-      api.getMonitoramentoEventos({ fonte: sourceFilter || undefined, status: statusFilter || undefined, page, per_page: 20 }),
-      api.getMonitoramentoResumo(),
-    ]).then(([eventResult, summaryResult]) => {
-      if (!active) return;
-      setEvents(eventResult);
-      setSummary(summaryResult);
-    }).catch((reason: unknown) => {
+    api.getMonitoramentoEventos({ fonte: sourceFilter || undefined, status: statusFilter || undefined, page, per_page: 20 })
+      .then((eventResult) => {
+        if (active) setEvents(eventResult);
+      }).catch((reason: unknown) => {
       if (!active) return;
       setError(reason instanceof Error ? reason.message : 'Não foi possível carregar os alertas.');
     }).finally(() => { if (active) setLoading(false); });
@@ -164,10 +167,10 @@ export default function MonitoramentoPage() {
         </header>
 
         <section className="monitor-summary" aria-label="Resumo dos eventos">
-          <div className="monitor-summary-total"><span>Eventos carregados</span><strong>{summary?.total ?? '—'}</strong></div>
+          <div className="monitor-summary-total"><span>Eventos carregados</span><strong>{summary ? formatCount(summary.total) : '—'}</strong></div>
           {(['novo', 'em_andamento', 'resolvido'] as const).map((status) => (
             <div className="monitor-summary-status" key={status}>
-              <span>{STATUS_LABELS[status]}</span><strong>{summary?.por_status[status] ?? 0}</strong>
+              <span>{STATUS_LABELS[status]}</span><strong>{formatCount(summary?.por_status[status] ?? 0)}</strong>
             </div>
           ))}
         </section>
@@ -209,7 +212,7 @@ export default function MonitoramentoPage() {
         {events && events.total_pages > 1 && (
           <nav className="monitor-pagination" aria-label="Paginação dos eventos">
             <button type="button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>Anterior</button>
-            <span>Página {events.page} de {events.total_pages} · {events.total} eventos</span>
+            <span>Página {events.page} de {events.total_pages} · {formatCount(events.total)}{events.total_limitado ? '+' : ''} eventos</span>
             <button type="button" disabled={page >= events.total_pages || loading} onClick={() => setPage((value) => value + 1)}>Próxima</button>
           </nav>
         )}
