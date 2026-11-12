@@ -267,6 +267,38 @@ Runs in a single transaction with the generic audit trigger disabled only
 inside it (it would copy each polygon into `log_auditoria`, ~244 MB); a
 compact audit row (old name → new name) is written for each UC instead.
 
+### 9. Importar o backup CSV do PostgreSQL (MySQL)
+
+**Script**: `import_pg_backup.mjs` — applied in production (EC2) on 2026-11-12
+from `bioguardians_dados_csv_2026-09-30.zip`.
+
+Unlike the loaders above, it targets the MySQL schema. It does not connect to
+the database: it turns the backup (one CSV per table) into a `.sql` file.
+
+```bash
+node import_pg_backup.mjs <csv-dir> import.sql [--repair-ids=27,149,...]
+mysql --default-character-set=utf8mb4 --max-allowed-packet=64M -u ... -p <db> < import.sql
+```
+
+- Aborts unless `especie`, `area_protegida` and `ocorrencia` are empty. Keeps
+  the original ids.
+- Triggers compute `geom` and `ocorrencia_area`; missing links from the
+  backup are added afterwards (for the 2026-09-30 backup both sets matched).
+- MySQL's validator rejects some polygons that PostGIS accepts and has no
+  `ST_MakeValid`. Run once without `--repair-ids` on a throwaway MySQL: the SQL
+  lists the rejected UCs (and skips them). Pass those ids to repair them with
+  JSTS (1e-7° grid + `buffer(0)`, area change capped at 0.1%). The
+  2026-09-30 backup needed these 41 ids:
+  `27,149,168,282,377,523,552,624,778,879,903,970,995,1060,1136,1665,1723,2092,2173,2183,2237,2273,2279,2311,2318,2371,2438,2511,2513,2514,2522,2524,2538,2539,2615,2649,2693,2840,2973,3155,3258`.
+- The audit rows written by the triggers during the load are replaced by the
+  backup's `log_auditoria`. UC polygons are dropped from it (`geom_md5: null`).
+- Ends with `CALL refresh_dashboard()`. Afterwards run `DELETE FROM area_tile;`
+  and restart the backend so no tile generated from the empty database
+  survives, then pre-generate tiles (`npm run generate-area-tiles` in
+  `backend/`, or request them through the API).
+- In production it ran as root with `SET SESSION sql_log_bin = 0;` prepended,
+  so the ~150 MB of UC inserts did not go to the binlog on a small disk.
+
 ### Legacy SQL (one-off, already applied in production)
 
 - `cleanup_mock_data.sql` — removed the mock data inserted by the old

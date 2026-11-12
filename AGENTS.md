@@ -276,6 +276,7 @@ docker exec bioguardians-ml python -m app.cli status --job-id 29
 - `enrich_species_descriptions.mjs` — resumos via Wikipedia (PT/EN), Wikidata, iNaturalist e EOL
 - `enrich_species_images.mjs` — imagens via iNaturalist, Wikimedia Commons (Wikidata P18) e Wikipedia
 - `validate_categories.mjs` — padroniza categorias de ameaça (MMA > IUCN > AI)
+- `import_pg_backup.mjs` — converte o backup CSV do PostgreSQL num `.sql` para o MySQL (só em banco vazio; repara com JSTS as UCs que o MySQL recusa). Já aplicado na EC2 em 2026-11-12
 - Após carga de UCs, rode `npm run generate-area-tiles` no backend (ou `DELETE FROM area_tile;` para regenerar sob demanda)
 
 ## Observabilidade (OpenTelemetry + Grafana stack)
