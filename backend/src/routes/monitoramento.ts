@@ -92,12 +92,9 @@ function parseEventFeature(row: any): Record<string, unknown> {
   };
 }
 
-// STRAIGHT_JOIN mantém monitor_evento como tabela guia: com ORDER BY data + LIMIT
-// o MySQL percorre o índice por data e para em per_page linhas. Começando por
-// monitor_fonte (3 linhas) ele ordenaria a tabela inteira a cada página.
 const EVENT_FROM = `
   FROM monitor_evento e
-  STRAIGHT_JOIN monitor_fonte f ON f.id = e.fonte_id
+  JOIN monitor_fonte f ON f.id = e.fonte_id
   LEFT JOIN bioma b ON b.id = e.bioma_id
   LEFT JOIN monitor_atendimento a ON a.evento_id = e.id
   LEFT JOIN monitor_prioridade p ON p.evento_id = e.id`;
@@ -107,8 +104,8 @@ const EVENT_FROM = `
 // devolve total = MAX_COUNTED e total_limitado = true; use filtros para refinar.
 const MAX_COUNTED = 10_000;
 
-/** FROM mínimo para o COUNT: só faz join com o que algum filtro usa. */
-function countFrom(where: string[]): string {
+/** FROM mínimo (contagem e página de ids): só faz join com o que algum filtro usa. */
+function filterFrom(where: string[]): string {
   const joins = [
     where.some((clause) => clause.startsWith('a.')) ? 'JOIN monitor_atendimento a ON a.evento_id = e.id' : '',
     where.some((clause) => clause.startsWith('p.')) ? 'JOIN monitor_prioridade p ON p.evento_id = e.id' : '',
@@ -147,27 +144,36 @@ router.get('/eventos', cacheMiddleware(undefined, () => 60_000), async (req, res
       return;
     }
     const where = filter.where.length ? `WHERE ${filter.where.join(' AND ')}` : '';
-    const plan = await joinPlan(req);
-    const from = plan === 'status_first' ? EVENT_FROM.replace('STRAIGHT_JOIN', 'JOIN') : EVENT_FROM;
-    // date_first: SELECT STRAIGHT_JOIN fixa a ordem do FROM (eventos pela data,
-    // depois atendimento/prioridade por PK), senão o filtro de status puxa
-    // monitor_atendimento para a frente e o ORDER BY vira filesort.
-    const modifier = plan === 'date_first' ? 'STRAIGHT_JOIN' : '';
+    // date_first: STRAIGHT_JOIN fixa monitor_evento na frente, senão um filtro de
+    // status comum puxa monitor_atendimento para a frente e o ORDER BY vira filesort.
+    const modifier = (await joinPlan(req)) === 'date_first' ? 'STRAIGHT_JOIN' : '';
+    // Join adiado: a subconsulta escolhe só os ids da página (índice por data,
+    // coberto, para em OFFSET + LIMIT linhas) e só então busca as colunas e os
+    // joins dessas linhas. Pedindo todas as colunas numa consulta só, o otimizador
+    // preferia ler a tabela inteira e ordenar (~3,7 s com 700 mil eventos).
     const [count, result] = await Promise.all([
       query<{ total: number }>(
-        `SELECT COUNT(*) AS total FROM (SELECT 1 ${countFrom(filter.where)} ${where} LIMIT ?) capped`,
+        `SELECT COUNT(*) AS total FROM (SELECT 1 ${filterFrom(filter.where)} ${where} LIMIT ?) capped`,
         [...filter.params, MAX_COUNTED + 1]
       ),
       query<any>(
-        `SELECT ${modifier} e.id, e.tipo_evento_codigo, f.codigo AS fonte_codigo, f.nome AS fonte_nome,
+        `SELECT e.id, e.tipo_evento_codigo, f.codigo AS fonte_codigo, f.nome AS fonte_nome,
                 e.data_observacao, e.precisao_data, b.nome AS bioma, e.estado_uf,
                 e.municipio_nome, e.satelite, e.risco_fogo, e.frp_mw,
                 e.classe_fonte, e.area_alerta_ha,
                 p.nivel AS nivel_prioridade, p.score_final,
                 a.status AS status_atendimento, ST_AsGeoJSON(e.geom) AS geometria
-         ${from} ${where}
-         ORDER BY e.data_observacao DESC, e.id DESC
-         LIMIT ? OFFSET ?`,
+         FROM (
+           SELECT ${modifier} e.id ${filterFrom(filter.where)} ${where}
+           ORDER BY e.data_observacao DESC, e.id DESC
+           LIMIT ? OFFSET ?
+         ) page
+         JOIN monitor_evento e ON e.id = page.id
+         JOIN monitor_fonte f ON f.id = e.fonte_id
+         LEFT JOIN bioma b ON b.id = e.bioma_id
+         LEFT JOIN monitor_atendimento a ON a.evento_id = e.id
+         LEFT JOIN monitor_prioridade p ON p.evento_id = e.id
+         ORDER BY e.data_observacao DESC, e.id DESC`,
         [...filter.params, perPage, offset]
       ),
     ]);
