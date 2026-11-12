@@ -16,6 +16,11 @@ permissions:
   contents: read
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+  REPOSITORY_OWNER: ${{ github.repository_owner }}
+  REPOSITORY_NAME: ${{ github.event.repository.name }}
+
 jobs:
   prepare:
     name: Prepare
@@ -23,8 +28,7 @@ jobs:
     outputs:
       image: ${{ steps.vars.outputs.image }}
       tag: ${{ steps.vars.outputs.tag }}
-      backend_changed: ${{ steps.changes.outputs.backend }}
-      frontend_changed: ${{ steps.changes.outputs.frontend }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,13 +36,10 @@ jobs:
 
       - name: Resolve image names and release tag
         id: vars
-        env:
-          OWNER: ${{ github.repository_owner }}
-          REPOSITORY: ${{ github.event.repository.name }}
         run: |
-          owner_lower=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
-          repo_lower=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
-          echo "image=ghcr.io/$owner_lower/$repo_lower" >> "$GITHUB_OUTPUT"
+          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          repo_lower=$(printf '%s' "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]')
+          echo "image=$REGISTRY/$owner_lower/$repo_lower" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Detect changed services
@@ -50,7 +51,7 @@ jobs:
             frontend=true
           else
             echo "$changed" | grep -qE '^(backend/|db/)' && backend=true || backend=false
-            echo "$changed" | grep -qE '^(frontend/|stack\.yml|infra/nginx/|otel-collector-config\.yaml|observability/)' && frontend=true || frontend=false
+            echo "$changed" | grep -qE '^(frontend/|stack\.yml|infra/nginx/|otel-collector-config\.yaml|observability/|docker-compose\.ec2-observability\.yml)' && frontend=true || frontend=false
           fi
           echo "backend=$backend" >> "$GITHUB_OUTPUT"
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
@@ -72,54 +73,31 @@ jobs:
           done
           echo "Validated $previous sequential migrations."
 
-  build-backend:
-    name: Build backend
-    runs-on: ubuntu-latest
-    needs: prepare
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push backend image
-        if: ${{ needs.prepare.outputs.backend_changed == 'true' }}
-        uses: docker/build-push-action@v6
-        with:
-          context: ./backend
-          file: backend/Dockerfile
-          push: true
-          tags: |
-            ${{ needs.prepare.outputs.image }}-backend:${{ needs.prepare.outputs.tag }}
-            ${{ needs.prepare.outputs.image }}-backend:latest
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
-
-      - name: Tag unchanged backend image with this release
-        if: ${{ needs.prepare.outputs.backend_changed != 'true' }}
+      - name: Build image matrix
+        id: matrix
         env:
-          IMAGE: ${{ needs.prepare.outputs.image }}
-          TAG: ${{ needs.prepare.outputs.tag }}
+          BACKEND_CHANGED: ${{ steps.changes.outputs.backend }}
+          FRONTEND_CHANGED: ${{ steps.changes.outputs.frontend }}
         run: |
-          docker pull "$IMAGE-backend:latest"
-          docker tag "$IMAGE-backend:latest" "$IMAGE-backend:$TAG"
-          docker push "$IMAGE-backend:$TAG"
+          matrix=$(jq -cn \
+            --argjson frontend "$FRONTEND_CHANGED" \
+            --argjson backend "$BACKEND_CHANGED" '[
+              {"service":"frontend","context":"./frontend","dockerfile":"frontend/Dockerfile","should_build":$frontend},
+              {"service":"backend","context":"./backend","dockerfile":"backend/Dockerfile","should_build":$backend}
+            ]')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-  build-frontend:
-    name: Build frontend
+  build:
+    name: Build ${{ matrix.service }}
     runs-on: ubuntu-latest
     needs: prepare
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -127,13 +105,13 @@ jobs:
 
       - uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare frontend build arguments
-        if: ${{ needs.prepare.outputs.frontend_changed == 'true' }}
-        id: frontend-args
+        if: ${{ matrix.service == 'frontend' && matrix.should_build }}
+        id: args
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || '/api' }}
           VITE_MAPTILER_API_KEY: ${{ secrets.VITE_MAPTILER_API_KEY }}
@@ -149,41 +127,42 @@ jobs:
             echo EOF
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push frontend image
-        if: ${{ needs.prepare.outputs.frontend_changed == 'true' }}
+      - name: Build and push ${{ matrix.service }} image
+        if: ${{ matrix.should_build }}
         uses: docker/build-push-action@v6
         with:
-          context: ./frontend
-          file: frontend/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
-          build-args: ${{ steps.frontend-args.outputs.value }}
+          build-args: ${{ steps.args.outputs.value }}
           tags: |
-            ${{ needs.prepare.outputs.image }}-frontend:${{ needs.prepare.outputs.tag }}
-            ${{ needs.prepare.outputs.image }}-frontend:latest
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
+            ${{ needs.prepare.outputs.image }}-${{ matrix.service }}:${{ needs.prepare.outputs.tag }}
+            ${{ needs.prepare.outputs.image }}-${{ matrix.service }}:latest
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      - name: Tag unchanged frontend image with this release
-        if: ${{ needs.prepare.outputs.frontend_changed != 'true' }}
+      - name: Tag unchanged image with this release
+        if: ${{ !matrix.should_build }}
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          SERVICE: ${{ matrix.service }}
         run: |
-          docker pull "$IMAGE-frontend:latest"
-          docker tag "$IMAGE-frontend:latest" "$IMAGE-frontend:$TAG"
-          docker push "$IMAGE-frontend:$TAG"
+          docker pull "$IMAGE-$SERVICE:latest"
+          docker tag "$IMAGE-$SERVICE:latest" "$IMAGE-$SERVICE:$TAG"
+          docker push "$IMAGE-$SERVICE:$TAG"
 
-  migrations:
-    name: MySQL migrations
+  migrate:
+    name: Deploy migrations
     runs-on: ubuntu-latest
-    needs: [prepare, build-backend, build-frontend]
+    needs: [prepare, build]
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare deployment files
+      - name: Prepare MySQL deployment environment
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -225,7 +204,7 @@ jobs:
           os.chmod("deploy.env", 0o600)
           PY
 
-      - name: Configure SSH
+      - name: Configure SSH key
         env:
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
           EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
@@ -238,7 +217,7 @@ jobs:
           chmod 600 "$RUNNER_TEMP/ec2_deploy_key"
           ssh-keyscan -p "$EC2_SSH_PORT" -H "$EC2_SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Copy release files to EC2
+      - name: Copy database and Compose files to EC2
         env:
           EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
           EC2_SSH_USER: ${{ secrets.EC2_SSH_USER || 'ubuntu' }}
@@ -246,21 +225,12 @@ jobs:
         run: |
           ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
             "$EC2_SSH_USER@$EC2_SSH_HOST" \
-            'mkdir -p ~/bioguardians/db ~/bioguardians/observability ~/bioguardians/infra/nginx'
+            'mkdir -p ~/bioguardians/db'
           scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" \
-            deploy.env stack.yml docker-compose.ec2-observability.yml \
+            deploy.env stack.yml \
             "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/"
           scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" -r \
             db/. "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/db/"
-          scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" -r \
-            observability/. \
-            "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/observability/"
-          scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" \
-            otel-collector-config.yaml \
-            "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/"
-          scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" \
-            infra/nginx/bioguardians-ec2.conf \
-            "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/infra/nginx/"
 
       - name: Start MySQL on EC2
         env:
@@ -286,18 +256,59 @@ jobs:
             'cd ~/bioguardians && \
              sudo docker compose --env-file .env -f stack.yml run --rm migrate'
 
-  deploy:
-    name: Deploy to EC2
+  generate-stack:
+    name: Generate stack
     runs-on: ubuntu-latest
-    needs: [prepare, build-backend, build-frontend, migrations]
+    needs: [prepare, migrate]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate release Compose stack
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          release = Path("release")
+          (release / "observability").mkdir(parents=True, exist_ok=True)
+          (release / "infra" / "nginx").mkdir(parents=True, exist_ok=True)
+
+          stack = Path("stack.yml").read_text(encoding="utf-8")
+          stack = stack.replace("${IMAGE:?IMAGE is required}", os.environ["IMAGE"])
+          stack = stack.replace("${IMAGE_TAG:?IMAGE_TAG is required}", os.environ["IMAGE_TAG"])
+          (release / "stack.yml").write_text(stack, encoding="utf-8")
+          PY
+          cp docker-compose.ec2-observability.yml otel-collector-config.yaml release/
+          cp -R observability/. release/observability/
+          cp infra/nginx/bioguardians-ec2.conf release/infra/nginx/
+
+      - name: Upload release stack
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-stack-${{ needs.prepare.outputs.tag }}
+          path: release/
+          retention-days: 1
+
+  deploy:
+    name: Deploy on VM
+    runs-on: ubuntu-latest
+    needs: [prepare, generate-stack]
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Download release stack
+        uses: actions/download-artifact@v4
+        with:
+          name: release-stack-${{ needs.prepare.outputs.tag }}
+          path: release
 
-      - name: Configure SSH
+      - name: Configure SSH key
         env:
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
           EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
@@ -309,6 +320,26 @@ jobs:
           printf '%s\n' "$EC2_SSH_KEY" > "$RUNNER_TEMP/ec2_deploy_key"
           chmod 600 "$RUNNER_TEMP/ec2_deploy_key"
           ssh-keyscan -p "$EC2_SSH_PORT" -H "$EC2_SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Copy generated stack to EC2
+        env:
+          EC2_SSH_HOST: ${{ secrets.EC2_SSH_HOST }}
+          EC2_SSH_USER: ${{ secrets.EC2_SSH_USER || 'ubuntu' }}
+          EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT || '22' }}
+        run: |
+          ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
+            "$EC2_SSH_USER@$EC2_SSH_HOST" \
+            'mkdir -p ~/bioguardians/observability ~/bioguardians/infra/nginx'
+          scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" \
+            release/stack.yml release/docker-compose.ec2-observability.yml \
+            release/otel-collector-config.yaml \
+            "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/"
+          scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" -r \
+            release/observability/. \
+            "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/observability/"
+          scp -i "$RUNNER_TEMP/ec2_deploy_key" -P "$EC2_SSH_PORT" \
+            release/infra/nginx/bioguardians-ec2.conf \
+            "$EC2_SSH_USER@$EC2_SSH_HOST:~/bioguardians/infra/nginx/"
 
       - name: Deploy containers and configure host Nginx
         env:
@@ -341,7 +372,8 @@ jobs:
 
           ssh -i "$RUNNER_TEMP/ec2_deploy_key" -p "$EC2_SSH_PORT" \
             "$EC2_SSH_USER@$EC2_SSH_HOST" \
-            'sudo install -m 0644 ~/bioguardians/infra/nginx/bioguardians-ec2.conf /etc/nginx/sites-available/bioguardians && \
+            'chmod 600 ~/bioguardians/.env && \
+             sudo install -m 0644 ~/bioguardians/infra/nginx/bioguardians-ec2.conf /etc/nginx/sites-available/bioguardians && \
              sudo rm -f /etc/nginx/sites-enabled/default && \
              sudo ln -sfn /etc/nginx/sites-available/bioguardians /etc/nginx/sites-enabled/bioguardians && \
              sudo nginx -t && sudo systemctl reload nginx && \
