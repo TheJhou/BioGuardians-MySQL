@@ -14,7 +14,7 @@ a configuração do site e recarrega o Nginx a cada deploy.
 No Security Group da EC2:
 
 - `80/tcp`: liberar para acesso ao site.
-- `443/tcp`: liberar quando HTTPS estiver configurado.
+- `443/tcp`: liberar para HTTPS (Cloudflare → Nginx; veja "Domínio e HTTPS").
 - `22/tcp`: permitir SSH da origem necessária para o runner do GitHub Actions.
   Não abra essa porta para `0.0.0.0/0` só para fazer o deploy funcionar. Os
   runners hospedados pelo GitHub usam endereços que podem mudar. Se a regra atual
@@ -25,8 +25,25 @@ No Security Group da EC2:
   Docker.
 
 Use um Elastic IP ou DNS estável como `EC2_SSH_HOST` e configure
-`FRONTEND_URL` com a origem pública, sem barra no final. O Nginx serve HTTP na
-porta 80; configure domínio e TLS separadamente antes de exigir HTTPS.
+`FRONTEND_URL` com a origem pública, sem barra no final.
+
+## Domínio e HTTPS (Cloudflare)
+
+O domínio público é `financemobile.com.br`, com DNS e proxy no Cloudflare. Uma
+única origem serve o site (`/`) e a API (`/api`), então não há subdomínio `api.`.
+
+- DNS: registro `A` de `@` (e `CNAME` de `www`, se quiser) para o IP **público**
+  da EC2, com proxy ligado.
+- O Nginx atende 80 e 443 no mesmo `server`. Na 443 usa um certificado *Origin CA*
+  do Cloudflare (SSL/TLS → Servidor de origem), instalado só na VM:
+  `/etc/cloudflare/origin-ca.crt` (0644) e `/etc/cloudflare/origin-ca.key`
+  (0600, root). Esses arquivos nunca entram no repositório; sem eles o
+  `nginx -t` do deploy falha.
+- Modo SSL/TLS do Cloudflare: **Full (strict)**. A porta 80 não redireciona para
+  HTTPS (isso faria loop no modo Flexível); use "Always Use HTTPS" no Cloudflare.
+- `FRONTEND_URL` = `https://financemobile.com.br`.
+- Security Group: 80 e 443 abertos (idealmente só para os
+  [IPs do Cloudflare](https://www.cloudflare.com/ips/)).
 
 ## Secrets e variáveis do GitHub
 
@@ -46,7 +63,7 @@ Em **Settings → Secrets and variables → Actions**, configure:
 | `GHCR_READ_TOKEN` | Secret | PAT com `read:packages`, se as imagens do GHCR forem privadas |
 | `GHCR_USERNAME` | Secret | Opcional; usuário dono do PAT, padrão é quem acionou o workflow |
 | `VITE_MAPTILER_API_KEY` | Secret | Chave MapTiler usada na compilação do frontend |
-| `FRONTEND_URL` | Variable | Origem pública, por exemplo `http://44.223.68.107` |
+| `FRONTEND_URL` | Variable | Origem pública, `https://financemobile.com.br` |
 | `VITE_API_URL` | Variable | Opcional; padrão `/api` |
 
 Para senhas aceitas pelo arquivo de ambiente do Compose, gere valores hexadecimais

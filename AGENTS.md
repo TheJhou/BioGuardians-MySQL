@@ -26,7 +26,7 @@ ml-service/     FastAPI + CLI de classificação de camera trap
 scripts/data/   importadores e enriquecimento (MMA, CNUC, GBIF, speciesLink, Wikipedia, iNaturalist)
 observability/ + otel-collector-config.yaml   configs da stack Grafana
 infra/nginx/bioguardians.conf                 Nginx legado (TLS + subdomínios)
-infra/nginx/bioguardians-ec2.conf             Nginx HTTP da EC2 (TLS após configurar domínio)
+infra/nginx/bioguardians-ec2.conf             Nginx da EC2 (80 + 443 com certificado Origin CA do Cloudflare)
 docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CACHE
 ```
 
@@ -343,7 +343,7 @@ GitHub Actions → GHCR (imagens) → SSH → migrations e atualização dos con
 - Deploy é acionado por push na `main`; branches de feature não publicam na VPS.
 - O workflow usa `stack.yml`, copia migrations/configurações via SCP e executa `migrate.sh` no container `migrate` dentro da rede Docker.
 - O banco persiste em `bioguardians_mysqldata` e não publica a porta 3306.
-- Frontend e backend só publicam em loopback (`127.0.0.1:8080` e `127.0.0.1:3001`); Nginx entrega HTTP na porta 80 e encaminha `/api` à API.
+- Frontend e backend só publicam em loopback (`127.0.0.1:8080` e `127.0.0.1:3001`); Nginx entrega o site nas portas 80 e 443 (atrás do proxy do Cloudflare, domínio `financemobile.com.br`) e encaminha `/api` à API.
 - Observabilidade fica desativada por padrão para reduzir RAM; pode ser ativada com o perfil `observability`. Grafana só publica em `127.0.0.1:3000`.
 - O ML service não é deployado na VM; roda localmente na máquina com GPU RTX 4060.
 
@@ -358,8 +358,8 @@ GitHub Actions → GHCR (imagens) → SSH → migrations e atualização dos con
 - O guia completo e os passos para registrar secrets estão em `docs/DEPLOY_EC2.md`.
 
 ### Security Group e Nginx
-- Liberar 80/tcp para o site e 443/tcp quando TLS estiver configurado.
+- Liberar 80/tcp e 443/tcp (idealmente só para os IPs do Cloudflare).
 - SSH 22/tcp deve aceitar apenas origens necessárias; runners GitHub-hosted usam IPs dinâmicos. Não abrir 22 para `0.0.0.0/0`; para regra estável, usar self-hosted runner ou AWS Systems Manager.
 - Não publicar 3306, 3000, 3100, 3200, 4317, 4318, 8889 ou 9090 à internet.
-- Nginx EC2: `infra/nginx/bioguardians-ec2.conf`; HTTPS exige domínio e certificados e será configurado separadamente.
+- Nginx EC2: `infra/nginx/bioguardians-ec2.conf`; HTTPS usa o certificado Origin CA do Cloudflare em `/etc/cloudflare/` (só na VM, nunca no repo); modo SSL do Cloudflare "Full (strict)".
 - `infra/nginx/bioguardians.conf` é a configuração legada TLS/subdomínios; não usar no primeiro deploy da EC2.
