@@ -2,8 +2,9 @@
 
 > **Migração PostgreSQL → MySQL em andamento** (fork de `TheJhou/BioGuardians`).
 > Feito: schema (`db/`), `migrate.sh`, smoke test, compose (dev), CI e backend (driver
-> `mysql2`, SQL das rotas, tiles MVT gerados no Node).
-> Falta: scripts de `scripts/data/`, ML service (asyncpg) e deploy/VM.
+> `mysql2`, SQL das rotas, tiles MVT gerados no Node). Deploy EC2 + MySQL via GitHub
+> Actions está em implementação na branch `feat/ec2-mysql-github-actions`.
+> Falta: scripts de `scripts/data/` e ML service (asyncpg).
 > Até lá, os loaders e o ML service ainda falam PostgreSQL e não rodam contra este banco.
 
 ## Stack
@@ -11,7 +12,7 @@
 - **Backend**: Node.js 22 + Express 5 + TypeScript (porta 3001)
 - **Frontend**: React 19 + Vite + TypeScript + MapLibre GL (via react-map-gl) + MapTiler Cloud + Chart.js
 - **ML Service**: Python 3.11 + FastAPI + OpenRouter (Claude Sonnet 4); Qwen2-VL-2B local opcional (porta 8001, local com GPU)
-- **Infra**: Docker Compose, Nginx, Oracle Cloud VM (produção) + máquina local com RTX 4060 (ML)
+- **Infra**: Docker Compose, Nginx, AWS EC2 (produção) + máquina local com RTX 4060 (ML)
 - **CI/CD**: GitHub Actions — `ci.yml` (PRs e branches ≠ main) e `deploy.yml` (push na main); ML service não é deployado
 - **Observabilidade**: OpenTelemetry, Grafana, Tempo, Prometheus, Loki
 
@@ -24,7 +25,8 @@ db/             migrate.sh, migrations/ (001–002), tests/smoke_test.sql
 ml-service/     FastAPI + CLI de classificação de camera trap
 scripts/data/   importadores e enriquecimento (MMA, CNUC, GBIF, speciesLink, Wikipedia, iNaturalist)
 observability/ + otel-collector-config.yaml   configs da stack Grafana
-infra/nginx/bioguardians.conf                 Nginx da VM (TLS + subdomínios)
+infra/nginx/bioguardians.conf                 Nginx legado (TLS + subdomínios)
+infra/nginx/bioguardians-ec2.conf             Nginx HTTP da EC2 (TLS após configurar domínio)
 docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CACHE
 ```
 
@@ -55,7 +57,7 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 - Refresh dos agregados do dashboard: `CALL refresh_dashboard();`
 - Pré-gerar tiles das UCs: `cd backend && npm run generate-area-tiles`
 - Typecheck: `npm run typecheck` em `backend/` e `frontend/`
-- Subir produção: `cd ~/bioguardians && sudo docker compose -f stack.yml pull && sudo docker compose -f stack.yml up -d`
+- Produção EC2: deploy automático via GitHub Actions na `main`; detalhes em `docs/DEPLOY_EC2.md`
 
 ## Decisões de modelagem
 - SRID 4326 (WGS84) para todas as geometrias. **Ordem dos eixos**: no MySQL, em SRID 4326, `ST_X` devolve a **latitude** e `ST_AsText`/`ST_GeomFromText` usam lat/lon. Use `ST_Longitude`/`ST_Latitude`, GeoJSON (`ST_GeomFromGeoJSON`/`ST_AsGeoJSON`, sempre lon/lat) ou `ST_SRID(POINT(lon, lat), 4326)`. O smoke test 8 pega a inversão
@@ -307,7 +309,7 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 # Imagens de produção fora da VM (app + observabilidade)
 docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d
 ```
-Na VM, o `stack.yml` já inclui a stack de observabilidade.
+Na EC2, a observabilidade é opcional (`--profile observability`) para reduzir o uso de RAM inicial.
 
 ### Acesso
 - Grafana: http://localhost:3000 (admin/admin no overlay; na VM a senha vem de `GRAFANA_ADMIN_PASSWORD`)
@@ -328,67 +330,35 @@ Na VM, o `stack.yml` já inclui a stack de observabilidade.
 - `bioguardians_cache_hits_total` / `bioguardians_cache_misses_total` (counter) — cache hit rate
 - `bioguardians_errors_total` (counter) — erros por tipo/status
 
-## Produção com domínio próprio
+## Produção na AWS EC2
 
-### Arquitetura
+### Arquitetura atual
 ```
-Internet → Cloudflare (DNS + HTTPS) → Nginx na VM → Docker
-  financemobile.com.br              → 127.0.0.1:8080  (frontend)
-  api.financemobile.com.br          → 127.0.0.1:3001  (backend)
-  grafana.financemobile.com.br      → 127.0.0.1:3000  (Grafana)
-  pgadmin.financemobile.com.br      → 127.0.0.1:5050  (pgAdmin — direto na VM)
-  portainer.financemobile.com.br    → 127.0.0.1:9443  (Portainer — direto na VM)
+Internet → Security Group AWS → Nginx no host (80) → frontend (8080) / backend (3001)
+                                                    └→ Docker Compose → MySQL 8.4 (rede privada)
+GitHub Actions → GHCR (imagens) → SSH → migrations e atualização dos containers na EC2
 ```
 
-### Variáveis de ambiente
-- `VITE_API_URL=https://api.financemobile.com.br/api` (frontend, build-arg — deve terminar em `/api`)
-- `VITE_MAPTILER_API_KEY` (frontend, build-arg — obrigatório para o mapa)
-- `FRONTEND_URL=https://financemobile.com.br` (backend — também vira `CORS_ORIGIN` no `stack.yml`)
+- Deploy é acionado por push na `main`; branches de feature não publicam na VPS.
+- O workflow usa `stack.yml`, copia migrations/configurações via SCP e executa `migrate.sh` no container `migrate` dentro da rede Docker.
+- O banco persiste em `bioguardians_mysqldata` e não publica a porta 3306.
+- Frontend e backend só publicam em loopback (`127.0.0.1:8080` e `127.0.0.1:3001`); Nginx entrega HTTP na porta 80 e encaminha `/api` à API.
+- Observabilidade fica desativada por padrão para reduzir RAM; pode ser ativada com o perfil `observability`. Grafana só publica em `127.0.0.1:3000`.
+- O ML service não é deployado na VM; roda localmente na máquina com GPU RTX 4060.
 
-### Deploy
-- O workflow `deploy.yml` roda em push na `main` (ignora commits que só mudam `*.md`): `prepare` (detecta mudanças + valida numeração das migrations) → `build` (backend/frontend no GHCR; serviço sem mudança só é re-taggeado) → `migrate` (migrations + smoke test no banco de produção) → `generate-stack` (renderiza `stack.yml` com secrets) → `deploy` (SCP + `docker compose -f stack.yml up -d` na VM)
-- A VM usa `stack.yml` (não `docker-compose.prod.yml`)
-- **ML service NÃO é deployado na VM** — roda localmente na máquina com GPU (RTX 4060)
-- PostgreSQL roda nativamente na VM; o backend conecta via `DATABASE_URL` montada a partir dos secrets
-- O container do frontend é um Nginx servindo só o build estático; a API é acessada pelo subdomínio `api.` via Nginx da VM
+### GitHub Actions secrets e variables
+- Secrets SSH: `EC2_SSH_HOST`, `EC2_SSH_KEY`; `EC2_SSH_USER` (padrão `ubuntu`) e `EC2_SSH_PORT` (padrão `22`) são opcionais.
+- Secrets MySQL: `DB_ROOT_PASSWORD`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`.
+- Secret `GRAFANA_ADMIN_PASSWORD` é necessário para validar a configuração Compose, mesmo com observabilidade opcional.
+- Secret `VITE_MAPTILER_API_KEY` é passado na compilação do frontend.
+- Secret `GHCR_READ_TOKEN` (escopo `read:packages`) é necessário quando os pacotes GHCR são privados.
+- Variable `FRONTEND_URL` configura origem pública/CORS; `VITE_API_URL` é opcional e usa `/api` por padrão.
+- Para compatibilidade com o Compose, senhas DB/Grafana devem ser 64 caracteres hexadecimais; não as commitar nem colar no chat.
+- O guia completo e os passos para registrar secrets estão em `docs/DEPLOY_EC2.md`.
 
-### Portas
-- Abertas para Internet: 80, 443, 22
-- Frontend `127.0.0.1:8080` e backend `127.0.0.1:3001` — só o Nginx da VM acessa
-- Fechar no firewall: 3000, 3100, 3200, 4317, 4318, 5050, 5432, 8889, 9090 (o `stack.yml` publica várias dessas em `0.0.0.0`)
-
-### Nginx
-- Config no repo: `infra/nginx/bioguardians.conf`
-- Configurar na VM em: `/etc/nginx/sites-available/bioguardians`
-- Certificado Cloudflare Origin CA: `/etc/cloudflare/origin-ca.crt`
-- Chave privada: `/etc/cloudflare/origin-ca.key`
-- NÃO commitar certificado/chave no Git.
-- pgAdmin e Portainer rodam direto na VM (fora do `stack.yml`)
-
-### Cloudflare
-- `A @`, `A api`, `A grafana`, `A pgadmin`, `A portainer` → IP público VM (Proxied)
-- SSL/TLS → Full (strict)
-
-### Comandos na VM
-```bash
-# Instalar Nginx (Oracle Linux)
-sudo dnf install -y nginx
-
-# Copiar config
-sudo cp infra/nginx/bioguardians.conf /etc/nginx/sites-available/bioguardians
-sudo ln -sf /etc/nginx/sites-available/bioguardians /etc/nginx/sites-enabled/
-
-# Certificado Origin CA
-sudo mkdir -p /etc/cloudflare
-sudo chown root:root /etc/cloudflare/origin-ca.crt /etc/cloudflare/origin-ca.key
-sudo chmod 600 /etc/cloudflare/origin-ca.key
-
-# Testar e recarregar
-sudo nginx -t
-sudo systemctl reload nginx
-
-# Reiniciar aplicação
-cd ~/bioguardians
-sudo docker compose -f stack.yml pull
-sudo docker compose -f stack.yml up -d
-```
+### Security Group e Nginx
+- Liberar 80/tcp para o site e 443/tcp quando TLS estiver configurado.
+- SSH 22/tcp deve aceitar apenas origens necessárias; runners GitHub-hosted usam IPs dinâmicos. Não abrir 22 para `0.0.0.0/0`; para regra estável, usar self-hosted runner ou AWS Systems Manager.
+- Não publicar 3306, 3000, 3100, 3200, 4317, 4318, 8889 ou 9090 à internet.
+- Nginx EC2: `infra/nginx/bioguardians-ec2.conf`; HTTPS exige domínio e certificados e será configurado separadamente.
+- `infra/nginx/bioguardians.conf` é a configuração legada TLS/subdomínios; não usar no primeiro deploy da EC2.

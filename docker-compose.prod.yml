@@ -1,7 +1,6 @@
 # ============================================================
-# BioGuardians - Production Docker Compose
-# Used on the Oracle VM. References pre-built images from GHCR.
-# PostgreSQL runs NATIVELY on the VM (not in Docker).
+# LEGACY: PostgreSQL deployment for the former Oracle VM.
+# Do not use for the MySQL EC2 deployment; GitHub Actions deploys stack.yml.
 #
 # Frontend (nginx) proxies /api to the backend container.
 # Access: http://<VM_IP>:8080

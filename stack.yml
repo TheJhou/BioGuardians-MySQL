@@ -1,35 +1,99 @@
+# BioGuardians production stack for an EC2 VM.
+# MySQL stays on the private Compose network; only the host Nginx can reach
+# the frontend and backend through loopback bindings.
 services:
-  backend:
-    image: ${IMAGE}-backend:latest
-    container_name: bioguardians-backend
+  db:
+    image: mysql:8.4
+    container_name: bioguardians-db
     restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_as_cs
+      - --default-time-zone=+00:00
+      - --innodb-buffer-pool-size=512M
+      - --max-connections=60
+      - --log-bin-trust-function-creators=1
     environment:
-      - NODE_ENV=production
-      - PORT=3001
-      - DATABASE_URL=${DATABASE_URL}
-      - FRONTEND_URL=${FRONTEND_URL}
-      - CORS_ORIGIN=${FRONTEND_URL}
-      - GBIF_API_BASE=https://api.gbif.org/v1
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4318
-      - OTEL_SERVICE_NAME=bioguardians-backend
-      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production
-    ports:
-      - "127.0.0.1:3001:3001"
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${DB_NAME:?DB_NAME is required}
+      MYSQL_USER: ${DB_USER:?DB_USER is required}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes:
+      - bioguardians_mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     networks:
       - bioguardians-network
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: "1"
+          memory: 1536M
+          cpus: "2"
+
+  migrate:
+    image: mysql:8.4
+    container_name: bioguardians-migrate
+    restart: "no"
     depends_on:
-      - otel-collector
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: ${DB_USER:?DB_USER is required}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_NAME: ${DB_NAME:?DB_NAME is required}
+    volumes:
+      - ./db:/db:ro
+    entrypoint: ["bash", "/db/migrate.sh"]
+    networks:
+      - bioguardians-network
+
+  backend:
+    image: ${IMAGE:?IMAGE is required}-backend:${IMAGE_TAG:?IMAGE_TAG is required}
+    container_name: bioguardians-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=384
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      CACHE_MAX: ${CACHE_MAX:-100}
+      CACHE_TTL_MS: ${CACHE_TTL_MS:-30000}
+      PORT: 3001
+      FRONTEND_URL: ${FRONTEND_URL:?FRONTEND_URL is required}
+      CORS_ORIGIN: ${FRONTEND_URL:?FRONTEND_URL is required}
+      GBIF_API_BASE: https://api.gbif.org/v1
+    ports:
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - bioguardians-network
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+          cpus: "1"
 
   frontend:
-    image: ${IMAGE}-frontend:latest
+    image: ${IMAGE:?IMAGE is required}-frontend:${IMAGE_TAG:?IMAGE_TAG is required}
     container_name: bioguardians-frontend
     restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:80"
     networks:
@@ -37,10 +101,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: "1"
-    depends_on:
-      - backend
+          memory: 128M
+          cpus: "0.5"
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.110.0
@@ -49,17 +111,14 @@ services:
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
-    ports:
-      - "4317:4317"
-      - "4318:4318"
-      - "8889:8889"
     networks:
       - bioguardians-network
+    profiles: [observability]
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: "0.5"
+          memory: 128M
+          cpus: "0.25"
 
   prometheus:
     image: prom/prometheus:v2.55.0
@@ -68,19 +127,18 @@ services:
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - bioguardians_prometheus:/prometheus
-    ports:
-      - "9090:9090"
     command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=168h"
-      - "--storage.tsdb.path=/prometheus"
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=168h
+      - --storage.tsdb.path=/prometheus
     networks:
       - bioguardians-network
+    profiles: [observability]
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: "0.5"
+          memory: 192M
+          cpus: "0.25"
 
   tempo:
     image: grafana/tempo:2.6.0
@@ -90,15 +148,14 @@ services:
     volumes:
       - ./observability/tempo.yml:/etc/tempo.yaml:ro
       - bioguardians_tempo:/var/tempo
-    ports:
-      - "3200:3200"
     networks:
       - bioguardians-network
+    profiles: [observability]
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: "1"
+          memory: 256M
+          cpus: "0.5"
 
   loki:
     image: grafana/loki:3.3.0
@@ -108,48 +165,50 @@ services:
     volumes:
       - ./observability/loki.yml:/etc/loki/local-config.yaml:ro
       - bioguardians_loki:/loki
-    ports:
-      - "3100:3100"
     networks:
       - bioguardians-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "1"
-
-  grafana:
-    image: grafana/grafana:11.4.0
-    container_name: bioguardians-grafana
-    restart: unless-stopped
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/bioguardians-overview.json
-    volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - bioguardians_grafana:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    networks:
-      - bioguardians-network
-    depends_on:
-      - prometheus
-      - tempo
-      - loki
+    profiles: [observability]
     deploy:
       resources:
         limits:
           memory: 256M
           cpus: "0.5"
 
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: bioguardians-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/bioguardians-overview.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - bioguardians_grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - bioguardians-network
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    profiles: [observability]
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+          cpus: "0.25"
+
 networks:
   bioguardians-network:
     driver: bridge
 
 volumes:
+  bioguardians_mysqldata:
+    name: bioguardians_mysqldata
   bioguardians_prometheus:
   bioguardians_tempo:
   bioguardians_loki:

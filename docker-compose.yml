@@ -10,8 +10,8 @@ services:
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_0900_as_cs
       --default-time-zone=+00:00
-      --innodb-buffer-pool-size=2G
-      --max-connections=100
+      --innodb-buffer-pool-size=1G
+      --max-connections=60
       --log-bin-trust-function-creators=1
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required, copy .env.example to .env}
@@ -31,7 +31,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6G
+          memory: 3G
           cpus: "4"
 
   # ---------- Migration runner (one-shot) ----------
@@ -69,6 +69,7 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
       CACHE_TTL_MS: ${CACHE_TTL_MS:-60000}
       CACHE_MAX: ${CACHE_MAX:-500}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
       GBIF_API_BASE: https://api.gbif.org/v1
     ports:
       - "127.0.0.1:3001:3001"
@@ -84,7 +85,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 768M
           cpus: "2"
 
   # ---------- Environmental monitoring ingestion worker ----------
@@ -99,12 +100,12 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
-      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+      DB_POOL_MAX: ${DB_POOL_MAX:-5}
     command: ["node", "--import", "./dist/telemetry/instrumentation.js", "dist/monitoramento/workerMain.js"]
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
           cpus: "1"
 
   # ---------- Frontend (React + Vite dev server) ----------
@@ -125,7 +126,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 256M
           cpus: "1"
 
   # ---------- ML Service (Python + FastAPI + VLM, GPU) ----------
@@ -148,7 +149,7 @@ services:
       LOCAL_VLM_ENABLED: ${LOCAL_VLM_ENABLED:-true}
       LOCAL_VLM_PATH: ${LOCAL_VLM_PATH:-models/qwen2vl-finetuned}
       YOLO_DEVICE: ${YOLO_DEVICE:-cuda}
-      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-120}
       VLM_CONCURRENCY: ${VLM_CONCURRENCY:-8}
       IMAGE_STORAGE_DIR: /app/images
