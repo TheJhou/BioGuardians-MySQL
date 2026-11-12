@@ -5,7 +5,12 @@ import type {
   MonitorEventCollection, MonitorEventDetail, MonitorSummary, MonitorSource,
 } from '../types/index.js';
 
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+// VITE_API_URL may be relative (`/api`, the production default). The MapLibre
+// tile worker only accepts absolute URLs, so resolve it against the page origin.
+export const API_URL = new URL(
+  import.meta.env.VITE_API_URL || 'http://localhost:3001/api',
+  window.location.origin,
+).href.replace(/\/+$/, '');
 
 const pendingRequests = new Map<string, Promise<unknown>>();
 
