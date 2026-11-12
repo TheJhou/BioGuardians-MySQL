@@ -18,7 +18,10 @@ const STATUS_LABELS: Record<string, string> = {
 
 function formatDate(value: string | null): string {
   if (!value) return 'Data não informada';
-  const parsed = new Date(`${value.replace(' ', 'T')}Z`);
+  // A API devolve DATETIME em UTC, às vezes já em ISO com "Z": só acrescenta o
+  // fuso quando ele não vem (senão "...ZZ" vira data inválida e aparece crua).
+  const iso = value.replace(' ', 'T');
+  const parsed = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('pt-BR');
 }
 
