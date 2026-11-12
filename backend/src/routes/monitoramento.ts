@@ -49,7 +49,8 @@ function baseWhere(req: any): { where: string[]; params: unknown[]; error?: stri
   if (bboxRaw && !bounds) return { where, params, error: 'bbox inválido; use minLng,minLat,maxLng,maxLat' };
 
   if (tipo) { where.push('e.tipo_evento_codigo = ?'); params.push(tipo); }
-  if (fonte) { where.push('f.codigo = ?'); params.push(fonte); }
+  // Filtra por e.fonte_id (índice fonte+data) sem depender do join com monitor_fonte.
+  if (fonte) { where.push('e.fonte_id = (SELECT id FROM monitor_fonte WHERE codigo = ?)'); params.push(fonte); }
   if (biomaId) { where.push('e.bioma_id = ?'); params.push(biomaId); }
   if (estado) { where.push('e.estado_uf = ?'); params.push(estado.toUpperCase()); }
   if (desde) { where.push('e.data_observacao >= ?'); params.push(`${desde} 00:00:00`); }
@@ -91,37 +92,93 @@ function parseEventFeature(row: any): Record<string, unknown> {
   };
 }
 
+// STRAIGHT_JOIN mantém monitor_evento como tabela guia: com ORDER BY data + LIMIT
+// o MySQL percorre o índice por data e para em per_page linhas. Começando por
+// monitor_fonte (3 linhas) ele ordenaria a tabela inteira a cada página.
 const EVENT_FROM = `
   FROM monitor_evento e
-  JOIN monitor_fonte f ON f.id = e.fonte_id
+  STRAIGHT_JOIN monitor_fonte f ON f.id = e.fonte_id
   LEFT JOIN bioma b ON b.id = e.bioma_id
   LEFT JOIN monitor_atendimento a ON a.evento_id = e.id
   LEFT JOIN monitor_prioridade p ON p.evento_id = e.id`;
 
-router.get('/eventos', cacheMiddleware(undefined, () => 15_000), async (req, res, next) => {
+// A contagem e a paginação param em MAX_COUNTED eventos: contar ~700 mil linhas
+// (e pular OFFSETs enormes) a cada página custava segundos. Acima disso a API
+// devolve total = MAX_COUNTED e total_limitado = true; use filtros para refinar.
+const MAX_COUNTED = 10_000;
+
+/** FROM mínimo para o COUNT: só faz join com o que algum filtro usa. */
+function countFrom(where: string[]): string {
+  const joins = [
+    where.some((clause) => clause.startsWith('a.')) ? 'JOIN monitor_atendimento a ON a.evento_id = e.id' : '',
+    where.some((clause) => clause.startsWith('p.')) ? 'JOIN monitor_prioridade p ON p.evento_id = e.id' : '',
+  ].filter(Boolean).join(' ');
+  return `FROM monitor_evento e ${joins}`;
+}
+
+/**
+ * Com filtro de status/prioridade raro (ex.: 'resolvido' com 0 linhas), percorrer
+ * o índice por data até achar per_page linhas varreria a tabela toda; melhor o
+ * otimizador começar pelo índice de status. Já um valor comum ('novo' = 100%)
+ * fica rápido pela data e lento pelo status (ordena tudo: ~1,8 s com 700 mil).
+ * A proporção vem de monitor_resumo (uma linha); sem resumo, deixa o otimizador decidir.
+ */
+async function joinPlan(req: any): Promise<'default' | 'date_first' | 'status_first'> {
+  const status = getParam(req.query.status);
+  const prioridade = getParam(req.query.prioridade);
+  if (!status && !prioridade) return 'default';
+  const { rows } = await query<any>('SELECT total, por_status, por_prioridade FROM monitor_resumo WHERE id = 1');
+  const snapshot = rows[0];
+  const total = Number(snapshot?.total ?? 0);
+  if (!total) return 'status_first';
+  const share = (counts: Record<string, number> | null, value: string | undefined) =>
+    value ? Number(counts?.[value] ?? 0) / total : 1;
+  const rarest = Math.min(share(snapshot.por_status, status), share(snapshot.por_prioridade, prioridade));
+  return rarest < 0.05 ? 'status_first' : 'date_first';
+}
+
+router.get('/eventos', cacheMiddleware(undefined, () => 60_000), async (req, res, next) => {
   try {
     const filter = baseWhere(req);
     if (filter.error) { res.status(400).json({ error: filter.error }); return; }
     const { page, perPage, offset } = getPaginationParams(req.query);
+    if (offset + perPage > MAX_COUNTED) {
+      res.status(400).json({ error: `A listagem vai até ${MAX_COUNTED} eventos; use filtros para refinar a busca` });
+      return;
+    }
     const where = filter.where.length ? `WHERE ${filter.where.join(' AND ')}` : '';
-    const count = await query<{ total: number }>(`SELECT COUNT(*) AS total ${EVENT_FROM} ${where}`, filter.params);
-    const result = await query<any>(
-      `SELECT e.id, e.tipo_evento_codigo, f.codigo AS fonte_codigo, f.nome AS fonte_nome,
-              e.data_observacao, e.precisao_data, b.nome AS bioma, e.estado_uf,
-              e.municipio_nome, e.satelite, e.risco_fogo, e.frp_mw,
-              e.classe_fonte, e.area_alerta_ha,
-              p.nivel AS nivel_prioridade, p.score_final,
-              a.status AS status_atendimento, ST_AsGeoJSON(e.geom) AS geometria
-       ${EVENT_FROM} ${where}
-       ORDER BY e.data_observacao IS NULL, e.data_observacao DESC, e.id DESC
-       LIMIT ? OFFSET ?`,
-      [...filter.params, perPage, offset]
-    );
-    const paginated = paginate(result.rows.map(parseEventFeature), page, perPage, Number(count.rows[0]?.total ?? 0));
+    const plan = await joinPlan(req);
+    const from = plan === 'status_first' ? EVENT_FROM.replace('STRAIGHT_JOIN', 'JOIN') : EVENT_FROM;
+    // date_first: SELECT STRAIGHT_JOIN fixa a ordem do FROM (eventos pela data,
+    // depois atendimento/prioridade por PK), senão o filtro de status puxa
+    // monitor_atendimento para a frente e o ORDER BY vira filesort.
+    const modifier = plan === 'date_first' ? 'STRAIGHT_JOIN' : '';
+    const [count, result] = await Promise.all([
+      query<{ total: number }>(
+        `SELECT COUNT(*) AS total FROM (SELECT 1 ${countFrom(filter.where)} ${where} LIMIT ?) capped`,
+        [...filter.params, MAX_COUNTED + 1]
+      ),
+      query<any>(
+        `SELECT ${modifier} e.id, e.tipo_evento_codigo, f.codigo AS fonte_codigo, f.nome AS fonte_nome,
+                e.data_observacao, e.precisao_data, b.nome AS bioma, e.estado_uf,
+                e.municipio_nome, e.satelite, e.risco_fogo, e.frp_mw,
+                e.classe_fonte, e.area_alerta_ha,
+                p.nivel AS nivel_prioridade, p.score_final,
+                a.status AS status_atendimento, ST_AsGeoJSON(e.geom) AS geometria
+         ${from} ${where}
+         ORDER BY e.data_observacao DESC, e.id DESC
+         LIMIT ? OFFSET ?`,
+        [...filter.params, perPage, offset]
+      ),
+    ]);
+    const counted = Number(count.rows[0]?.total ?? 0);
+    const limited = counted > MAX_COUNTED;
+    const paginated = paginate(result.rows.map(parseEventFeature), page, perPage, limited ? MAX_COUNTED : counted);
     res.json({
       type: 'FeatureCollection',
       features: paginated.data,
       total: paginated.total,
+      total_limitado: limited,
       page: paginated.page,
       per_page: paginated.per_page,
       total_pages: paginated.total_pages,
@@ -129,10 +186,26 @@ router.get('/eventos', cacheMiddleware(undefined, () => 15_000), async (req, res
   } catch (error) { next(error); }
 });
 
-router.get('/resumo', cacheMiddleware(undefined, () => 30_000), async (req, res, next) => {
+router.get('/resumo', cacheMiddleware(undefined, () => 60_000), async (req, res, next) => {
   try {
     const filter = baseWhere(req);
     if (filter.error) { res.status(400).json({ error: filter.error }); return; }
+
+    // Sem filtros (cards de KPI): lê a linha pré-calculada por
+    // refresh_monitor_resumo() ao fim de cada importação, sem varrer os eventos.
+    if (!filter.where.length) {
+      const snapshot = await query<any>(
+        `SELECT total, por_tipo, por_status, por_prioridade, por_bioma, atualizado_em
+         FROM monitor_resumo WHERE id = 1`
+      );
+      const row = snapshot.rows[0];
+      if (row) {
+        res.json({ total: Number(row.total), por_tipo: row.por_tipo, por_status: row.por_status,
+          por_prioridade: row.por_prioridade, por_bioma: row.por_bioma, atualizado_em: row.atualizado_em });
+        return;
+      }
+    }
+
     const where = filter.where.length ? `WHERE ${filter.where.join(' AND ')}` : '';
     const { rows } = await query<any>(
       `SELECT e.tipo_evento_codigo, a.status AS status_atendimento,
@@ -148,7 +221,7 @@ router.get('/resumo', cacheMiddleware(undefined, () => 30_000), async (req, res,
       return values;
     }, {});
     res.json({ total, por_tipo: grouped('tipo_evento_codigo'), por_status: grouped('status_atendimento'),
-      por_prioridade: grouped('nivel_prioridade'), por_bioma: grouped('bioma') });
+      por_prioridade: grouped('nivel_prioridade'), por_bioma: grouped('bioma'), atualizado_em: null });
   } catch (error) { next(error); }
 });
 

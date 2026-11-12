@@ -281,6 +281,17 @@ export async function finishExecution(
       JSON.stringify(parameters), result.checksum || null,
       error?.slice(0, 6000) ?? null, executionId]
   );
+  // Os cards de KPI leem monitor_resumo (GET /resumo sem filtros). Recalcula ao
+  // fim de toda execução, inclusive com erro: lotes já gravados ficam no banco.
+  // Uma falha aqui não invalida a importação; o próximo refresh corrige.
+  try {
+    await execute('CALL refresh_monitor_resumo()');
+  } catch (refreshError) {
+    logger.error('monitor_summary_refresh_failed', {
+      execution_id: executionId,
+      error: refreshError instanceof Error ? refreshError.message : String(refreshError),
+    });
+  }
 }
 
 export async function importInpeCsv(options: ImportOptions): Promise<ImportSummary> {

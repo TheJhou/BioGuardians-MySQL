@@ -175,6 +175,17 @@ test('INPE CSV e DETER WFS criam eventos espaciais; GET os devolve e reimportaç
   assert.equal(summary.total, 2);
   assert.equal(summary.por_status.novo, 2);
 
+  // Sem filtros, /resumo lê monitor_resumo, recalculado por finishExecution.
+  const kpiResponse = await fetch(`${baseUrl}/resumo`);
+  assert.equal(kpiResponse.status, 200);
+  const kpi = await kpiResponse.json() as any;
+  const liveTotal = await query<any>('SELECT COUNT(*) AS total FROM monitor_evento');
+  assert.equal(kpi.total, Number(liveTotal.rows[0].total));
+  assert.ok(kpi.atualizado_em);
+
+  const cappedResponse = await fetch(`${baseUrl}/eventos?per_page=100&page=101`);
+  assert.equal(cappedResponse.status, 400);
+
   const sourcesResponse = await fetch(`${baseUrl}/fontes`);
   assert.equal(sourcesResponse.status, 200);
   const sourcesPayload = await sourcesResponse.json() as any;
