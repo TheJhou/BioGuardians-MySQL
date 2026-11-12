@@ -7,7 +7,7 @@ WORKDIR /app
 COPY . .
 
 # Bake Vite env vars into the bundle at build time.
-ARG VITE_API_URL=https://api.financemobile.com.br/api
+ARG VITE_API_URL=/api
 ARG VITE_MAPTILER_API_KEY
 ENV VITE_API_URL=${VITE_API_URL}
 ENV VITE_MAPTILER_API_KEY=${VITE_MAPTILER_API_KEY}

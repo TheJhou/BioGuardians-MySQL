@@ -1,0 +1,11 @@
+# Optional production telemetry wiring. Use with stack.yml and --profile observability.
+services:
+  backend:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: bioguardians-backend
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
+    depends_on:
+      otel-collector:
+        condition: service_started

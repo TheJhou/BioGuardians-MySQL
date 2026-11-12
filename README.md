@@ -22,6 +22,11 @@ O porte do sistema para MySQL segue em andamento: os importadores existentes de
 ser considerados compatíveis com este banco até serem portados. A ingestão
 INPE/DETER descrita abaixo já usa o backend e o MySQL.
 
+O deploy da aplicação na AWS EC2 usa GitHub Actions, GHCR, Docker Compose,
+MySQL 8.4 em container e Nginx no host. Consulte
+[`docs/DEPLOY_EC2.md`](docs/DEPLOY_EC2.md) para pré-requisitos e configuração
+dos secrets e variáveis.
+
 ## Estrutura
 
 ```text
