@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Resolve image names and release tag
         id: vars
@@ -39,10 +39,21 @@ jobs:
           echo "image=$REGISTRY/$owner_lower/$repo_lower" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
+      # Manual runs rebuild every image. Pushes compare the whole pushed range
+      # (not only the last commit); if the base is unknown, rebuild everything.
       - name: Detect changed services
         id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          changed=$(git diff --name-only HEAD~1 HEAD || true)
+          changed=""
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] \
+            && [ -n "$BEFORE_SHA" ] \
+            && ! printf '%s' "$BEFORE_SHA" | grep -qE '^0+$' \
+            && git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE_SHA" HEAD || true)
+          fi
           if [ -z "$changed" ]; then
             backend=true
             frontend=true
