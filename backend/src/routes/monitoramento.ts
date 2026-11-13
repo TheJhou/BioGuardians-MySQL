@@ -1,11 +1,11 @@
 import { Router } from 'express';
-import { cacheMiddleware } from '../cache/cache.js';
+import { cacheMiddleware, getTileCache, setTileCache } from '../cache/cache.js';
 import { query } from '../db/pool.js';
 import { validateId } from '../middleware/validateId.js';
 import { parseBbox } from '../utils/bbox.js';
 import { getPaginationParams, paginate } from '../utils/paginate.js';
 import { getParam, parseParam } from '../utils/params.js';
-import { ENVELOPE_SQL, envelopeWkt } from '../mvt.js';
+import { ENVELOPE_SQL, encodeTile, envelopeWkt, tileEnvelope, type TileFeature } from '../mvt.js';
 
 const router = Router();
 const STATUSES = new Set(['novo', 'em_andamento', 'resolvido']);
@@ -230,6 +230,89 @@ router.get('/resumo', cacheMiddleware(undefined, () => 60_000), async (req, res,
       por_prioridade: grouped('nivel_prioridade'), por_bioma: grouped('bioma'), atualizado_em: null });
   } catch (error) { next(error); }
 });
+
+// --- Tiles MVT dos focos de calor (ícone de fogo no mapa) ---
+// Margem para o ícone não ser cortado na borda entre tiles vizinhos.
+const FOCO_TILE_BUFFER = 64;
+// Abaixo deste zoom os focos são agrupados numa grade (~32 células por tile):
+// 30 dias são ~700 mil pontos e um tile do Brasil inteiro ficaria pesado demais.
+const FOCO_CLUSTER_MAX_ZOOM = 8;
+const FOCO_CLUSTER_CELLS_PER_TILE = 32;
+const FOCO_MAX_DIAS = 30;
+const FOCO_DEFAULT_DIAS = 3;
+
+function isValidTile(z: number, x: number, y: number): boolean {
+  if (![z, x, y].every(Number.isInteger) || z < 0 || z > 20) return false;
+  const max = 2 ** z;
+  return x >= 0 && x < max && y >= 0 && y < max;
+}
+
+// GET /api/monitoramento/focos/tiles/:z/:x/:y.mvt?dias=3 — camada "foco".
+// A janela é contada a partir do foco mais recente no banco (não de hoje):
+// sem coleta diária, "últimas 24 h" ficaria vazio.
+// Propriedades: id (do foco, ou de um deles no grupo), n (focos no grupo), frp (MW, máximo).
+router.get('/focos/tiles/:z/:x/:y.mvt', async (req, res, next) => {
+  try {
+    const z = Number(req.params.z);
+    const x = Number(req.params.x);
+    const y = Number(req.params.y);
+    if (!isValidTile(z, x, y)) { res.status(400).json({ error: 'Coordenadas de tile inválidas' }); return; }
+    const diasRaw = getParam(req.query.dias);
+    const dias = diasRaw === undefined ? FOCO_DEFAULT_DIAS : Number(diasRaw);
+    if (!Number.isInteger(dias) || dias < 1 || dias > FOCO_MAX_DIAS) {
+      res.status(400).json({ error: `dias deve ser um inteiro entre 1 e ${FOCO_MAX_DIAS}` });
+      return;
+    }
+
+    const key = `route:/api/monitoramento/focos/tiles/${z}/${x}/${y}?d=${dias}`;
+    const cached = getTileCache(key);
+    if (cached) { sendFocoTile(res, cached); return; }
+
+    const conditions = [
+      `e.tipo_evento_codigo = 'foco_calor'`,
+      `e.data_observacao >= (SELECT DATE_SUB(MAX(m.data_observacao), INTERVAL ? DAY)
+                             FROM monitor_evento m WHERE m.tipo_evento_codigo = 'foco_calor')`,
+    ];
+    const params: unknown[] = [dias];
+    const envelope = tileEnvelope(z, x, y, FOCO_TILE_BUFFER);
+    if (envelope) { conditions.push(`MBRIntersects(e.geom, ${ENVELOPE_SQL})`); params.push(envelope); }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    let rows: { id: number; lon: number; lat: number; n: number; frp: number | null }[];
+    if (z < FOCO_CLUSTER_MAX_ZOOM) {
+      const cell = 360 / 2 ** z / FOCO_CLUSTER_CELLS_PER_TILE;
+      ({ rows } = await query<any>(
+        `SELECT MIN(e.id) AS id, AVG(ST_Longitude(e.geom)) AS lon, AVG(ST_Latitude(e.geom)) AS lat,
+                COUNT(*) AS n, MAX(e.frp_mw) AS frp
+         FROM monitor_evento e ${where}
+         GROUP BY FLOOR(ST_Longitude(e.geom) / ?), FLOOR(ST_Latitude(e.geom) / ?)`,
+        [...params, cell, cell]
+      ));
+    } else {
+      ({ rows } = await query<any>(
+        `SELECT e.id, ST_Longitude(e.geom) AS lon, ST_Latitude(e.geom) AS lat, 1 AS n, e.frp_mw AS frp
+         FROM monitor_evento e ${where}`,
+        params
+      ));
+    }
+
+    const features: TileFeature[] = rows.map((r) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [Number(r.lon), Number(r.lat)] },
+      properties: { id: Number(r.id), n: Number(r.n), frp: r.frp === null ? null : Number(r.frp) },
+    }));
+    const buffer = encodeTile('foco', features, z, x, y, FOCO_TILE_BUFFER);
+    setTileCache(key, buffer);
+    sendFocoTile(res, buffer);
+  } catch (error) { next(error); }
+});
+
+function sendFocoTile(res: any, buffer: Buffer): void {
+  res.set('Content-Type', 'application/vnd.mapbox-vector-tile');
+  // Curto: a janela anda a cada importação de focos.
+  res.set('Cache-Control', 'public, max-age=600');
+  res.send(buffer);
+}
 
 router.get('/fontes', cacheMiddleware(undefined, () => 30_000), async (_req, res, next) => {
   try {

@@ -106,6 +106,14 @@ export interface OcorrenciaTileProperties {
   categoria_ameaca: string;
 }
 
+// Tiles de focos de calor (camada "foco"). Nos zooms baixos cada feature é um
+// grupo: n > 1 e id de um dos focos. Detalhes em GET /monitoramento/eventos/:id.
+export interface FocoTileProperties {
+  id: number;
+  n: number;
+  frp: number | null;
+}
+
 // Subset dos tiles de áreas — o resto vem de GET /areas/:id/info
 export interface AreaTileProperties {
   id: number;

@@ -6,12 +6,16 @@ import DropdownSelect from '../components/DropdownSelect.js';
 import SpeciesSearch from '../components/SpeciesSearch.js';
 import GlowButton from '../components/GlowButton.js';
 import CosmicToggle from '../components/CosmicToggle.js';
+import FocoPanel, { FireGlyph } from '../components/FocoPanel.js';
 import {
   FONTE_LABELS, FONTE_OPTIONS, CATEGORY_OPTIONS,
-  CATEGORY_COLORS, UC_CATEGORY_COLORS, UC_CATEGORY_LABELS,
+  CATEGORY_COLORS, UC_CATEGORY_COLORS, UC_CATEGORY_LABELS, FOCO_DIAS_OPTIONS,
 } from '../constants/index.js';
 import { api } from '../api/client.js';
-import type { Especie, OcorrenciaProperties, OcorrenciaTileProperties, AreaTileProperties, EspecieEmArea } from '../types/index.js';
+import type {
+  Especie, OcorrenciaProperties, OcorrenciaTileProperties, AreaTileProperties, EspecieEmArea,
+  FocoTileProperties, MonitorEventDetail,
+} from '../types/index.js';
 
 interface MapFilters {
   categoria?: string;
@@ -21,6 +25,7 @@ interface MapFilters {
 interface MapLayers {
   unidades: boolean;
   ocorrencias: boolean;
+  focos: boolean;
 }
 
 interface SelectedEspecie {
@@ -29,9 +34,14 @@ interface SelectedEspecie {
 }
 
 const defaultFilters: MapFilters = {};
-const defaultLayers: MapLayers = { unidades: true, ocorrencias: true };
+const defaultLayers: MapLayers = { unidades: true, ocorrencias: true, focos: true };
+const DEFAULT_FOCOS_DIAS = 3;
 
 const fonteOptions = FONTE_OPTIONS.map((f) => ({ value: f, label: FONTE_LABELS[f] || f }));
+const focosDiasOptions = FOCO_DIAS_OPTIONS.map((d) => ({
+  value: String(d),
+  label: d === 1 ? 'Último dia' : `Últimos ${d} dias`,
+}));
 const categoriaOptions = CATEGORY_OPTIONS.map((c) => ({ value: c.codigo, label: c.nome }));
 
 // Rótulos curtos para caber na barra lateral; as cores vêm das mesmas
@@ -67,6 +77,12 @@ function MapLegend() {
           </div>
         ))}
       </div>
+      <div className="legend-section">
+        <span className="legend-section-title">Monitoramento</span>
+        <div className="legend-item">
+          <FireGlyph size={16} /> Foco de calor (INPE); ícone maior = vários focos
+        </div>
+      </div>
     </div>
   );
 }
@@ -86,6 +102,8 @@ export default function MapPage() {
   const [selectedOcorrencia, setSelectedOcorrencia] = useState<OcorrenciaProperties | null>(null);
   const [selectedArea, setSelectedArea] = useState<{ id: number; nome: string } | null>(null);
   const [selectedAreaSpecies, setSelectedAreaSpecies] = useState<EspecieEmArea[]>([]);
+  const [selectedFoco, setSelectedFoco] = useState<MonitorEventDetail | null>(null);
+  const [focosDias, setFocosDias] = useState(DEFAULT_FOCOS_DIAS);
 
   useEffect(() => {
     if (!selectedArea) {
@@ -101,9 +119,11 @@ export default function MapPage() {
     setDraft(defaultFilters);
     setApplied(defaultFilters);
     setLayers(defaultLayers);
+    setFocosDias(DEFAULT_FOCOS_DIAS);
     setSelectedEspecies([]);
     setSelectedOcorrencia(null);
     setSelectedArea(null);
+    setSelectedFoco(null);
     setSearchResetKey((k) => k + 1);
   };
 
@@ -127,8 +147,17 @@ export default function MapPage() {
     setSelectedEspecies((prev) => prev.filter((e) => e.id !== id));
   };
 
+  const handleSelectFoco = useCallback((tile: FocoTileProperties) => {
+    setSelectedArea(null);
+    setSelectedOcorrencia(null);
+    api.getMonitoramentoEvento(tile.id)
+      .then(setSelectedFoco)
+      .catch(() => setSelectedFoco(null));
+  }, []);
+
   const handleSelectOcorrencia = useCallback((tile: OcorrenciaTileProperties) => {
     setSelectedArea(null);
+    setSelectedFoco(null);
     api.getOcorrencia(tile.id)
       .then(setSelectedOcorrencia)
       .catch(() => setSelectedOcorrencia(null));
@@ -136,6 +165,7 @@ export default function MapPage() {
 
   const handleSelectArea = useCallback((tile: AreaTileProperties) => {
     setSelectedOcorrencia(null);
+    setSelectedFoco(null);
     setSelectedArea({ id: tile.id, nome: '' });
     api.getAreaInfo(tile.id)
       .then((info) => setSelectedArea((cur) => (cur?.id === info.id ? { ...cur, nome: info.nome } : cur)))
@@ -218,8 +248,30 @@ export default function MapPage() {
                   onChange={(v) => setLayers({ ...layers, ocorrencias: v })}
                 />
               </div>
+              <div className="toggle-item">
+                <span className="toggle-text">Focos de calor</span>
+                <CosmicToggle
+                  checked={layers.focos}
+                  onChange={(v) => {
+                    setLayers({ ...layers, focos: v });
+                    if (!v) setSelectedFoco(null);
+                  }}
+                />
+              </div>
             </div>
           </div>
+
+          {layers.focos && (
+            <div className="filter-group filter-group--full">
+              <label className="filter-label">Período dos focos</label>
+              <DropdownSelect
+                options={focosDiasOptions}
+                selected={String(focosDias)}
+                onSelect={(v) => setFocosDias(v ? Number(v) : DEFAULT_FOCOS_DIAS)}
+                placeholder={`Últimos ${DEFAULT_FOCOS_DIAS} dias`}
+              />
+            </div>
+          )}
 
           <GlowButton className="map-clear-btn" onClick={handleClear}>
             Limpar
@@ -254,9 +306,15 @@ export default function MapPage() {
             filters={applied}
             layers={layers}
             selectedEspecieIds={selectedEspecieIds}
+            focosDias={focosDias}
+            onSelectFoco={handleSelectFoco}
             onSelectOcorrencia={handleSelectOcorrencia}
             onSelectArea={handleSelectArea}
           />
+
+          {selectedFoco && (
+            <FocoPanel foco={selectedFoco} onClose={() => setSelectedFoco(null)} />
+          )}
 
           {selectedOcorrencia && (
             <OccurrencePanel

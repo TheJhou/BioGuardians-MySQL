@@ -186,6 +186,25 @@ test('INPE CSV e DETER WFS criam eventos espaciais; GET os devolve e reimportaç
   const cappedResponse = await fetch(`${baseUrl}/eventos?per_page=100&page=101`);
   assert.equal(cappedResponse.status, 400);
 
+  // Tiles de focos (ícone de fogo no mapa): z8 = pontos, z3 = grupos na grade.
+  const tileOf = (lon: number, lat: number, z: number) => {
+    const n = 2 ** z;
+    const rad = (lat * Math.PI) / 180;
+    return {
+      x: Math.floor(((lon + 180) / 360) * n),
+      y: Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n),
+    };
+  };
+  for (const z of [8, 3]) {
+    const { x, y } = tileOf(-53.893, -11.233, z);
+    const tileResponse = await fetch(`${baseUrl}/focos/tiles/${z}/${x}/${y}.mvt?dias=30`);
+    assert.equal(tileResponse.status, 200);
+    assert.equal(tileResponse.headers.get('content-type'), 'application/vnd.mapbox-vector-tile');
+    assert.ok((await tileResponse.arrayBuffer()).byteLength > 0, `tile z${z} de focos vazio`);
+  }
+  assert.equal((await fetch(`${baseUrl}/focos/tiles/8/0/0.mvt?dias=0`)).status, 400);
+  assert.equal((await fetch(`${baseUrl}/focos/tiles/2/9/0.mvt`)).status, 400);
+
   const sourcesResponse = await fetch(`${baseUrl}/fontes`);
   assert.equal(sourcesResponse.status, 200);
   const sourcesPayload = await sourcesResponse.json() as any;

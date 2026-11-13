@@ -3,7 +3,8 @@ import { Map, Source, Layer, NavigationControl } from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { api } from '../api/client.js';
 import { MAP_DEFAULTS, CATEGORY_COLORS, UC_CATEGORY_COLORS } from '../constants/index.js';
-import type { OcorrenciaTileProperties, AreaTileProperties } from '../types/index.js';
+import { ensureFireIcon, FIRE_ICON_ID } from '../lib/fireIcon.js';
+import type { OcorrenciaTileProperties, AreaTileProperties, FocoTileProperties } from '../types/index.js';
 
 const MAPTILER_API_KEY = import.meta.env.VITE_MAPTILER_API_KEY || '';
 
@@ -16,12 +17,16 @@ interface MapFilters {
 interface MapLayers {
   unidades: boolean;
   ocorrencias: boolean;
+  focos: boolean;
 }
 
 interface MapViewProps {
   filters: MapFilters;
   layers: MapLayers;
   selectedEspecieIds?: number[];
+  /** Janela dos focos de calor, em dias a partir do foco mais recente. */
+  focosDias: number;
+  onSelectFoco?: (foco: FocoTileProperties) => void;
   onSelectOcorrencia?: (ocorrencia: OcorrenciaTileProperties, lngLat: { lng: number; lat: number }) => void;
   onSelectArea?: (area: AreaTileProperties, lngLat: { lng: number; lat: number }) => void;
 }
@@ -45,6 +50,8 @@ function MapView({
   filters,
   layers,
   selectedEspecieIds,
+  focosDias,
+  onSelectFoco,
   onSelectOcorrencia,
   onSelectArea,
 }: MapViewProps) {
@@ -64,6 +71,19 @@ function MapView({
     [selectedEspecieIds, filters.categoria, filters.fonte]
   );
 
+  const focosTilesUrl = useMemo(() => api.getFocosTilesUrl({ dias: focosDias }), [focosDias]);
+  const focoTiles = useMemo(() => [focosTilesUrl], [focosTilesUrl]);
+
+  // O ícone de fogo é desenhado em canvas e registrado no estilo; se o estilo
+  // for recarregado, o MapLibre pede de novo via styleimagemissing.
+  const handleLoad = useCallback((evt: any) => {
+    const map = evt.target;
+    ensureFireIcon(map);
+    map.on('styleimagemissing', (e: { id: string }) => {
+      if (e.id === FIRE_ICON_ID) ensureFireIcon(map);
+    });
+  }, []);
+
   const areaTiles = useMemo(() => [areaTilesUrl], [areaTilesUrl]);
   const ocorrenciaTiles = useMemo(() => [ocorrenciasTilesUrl], [ocorrenciasTilesUrl]);
 
@@ -71,20 +91,31 @@ function MapView({
     const features: any[] = evt.features || [];
     const areaFeature = features.find((f) => f.layer.id === 'areas-fill');
     const ocorrenciaFeature = features.find((f) => f.layer.id === 'ocorrencias-circle');
+    const focoFeature = features.find((f) => f.layer.id === 'focos-icon');
     const lngLat = evt.lngLat;
     const point = { lng: lngLat.lng, lat: lngLat.lat };
 
-    if (ocorrenciaFeature && ocorrenciaFeature.properties && onSelectOcorrencia) {
+    if (focoFeature && focoFeature.properties) {
+      const foco = focoFeature.properties as FocoTileProperties;
+      if (foco.n > 1) {
+        // Grupo de focos: aproxima para separá-los.
+        const [lng, lat] = focoFeature.geometry.coordinates as [number, number];
+        evt.target.easeTo({ center: [lng, lat], zoom: Math.min(evt.target.getZoom() + 2, 14) });
+      } else if (onSelectFoco) {
+        onSelectFoco(foco);
+      }
+    } else if (ocorrenciaFeature && ocorrenciaFeature.properties && onSelectOcorrencia) {
       onSelectOcorrencia(ocorrenciaFeature.properties as OcorrenciaTileProperties, point);
     } else if (areaFeature && areaFeature.properties && onSelectArea) {
       onSelectArea(areaFeature.properties as AreaTileProperties, point);
     }
-  }, [onSelectOcorrencia, onSelectArea]);
+  }, [onSelectFoco, onSelectOcorrencia, onSelectArea]);
 
   const interactiveLayerIds = useMemo(() => [
     ...(layers.unidades ? ['areas-fill'] : []),
     ...(layers.ocorrencias ? ['ocorrencias-circle'] : []),
-  ], [layers.unidades, layers.ocorrencias]);
+    ...(layers.focos ? ['focos-icon'] : []),
+  ], [layers.unidades, layers.ocorrencias, layers.focos]);
 
   return (
     <div className="map-container">
@@ -97,6 +128,7 @@ function MapView({
         fadeDuration={0}
         maxTileCacheSize={1000}
         onClick={handleClick}
+        onLoad={handleLoad}
         onError={(evt) => setError(String(evt.error?.message ?? evt.error) || 'Falha ao carregar o mapa. Verifique a chave do MapTiler.')}
         interactiveLayerIds={interactiveLayerIds}
       >
@@ -147,6 +179,33 @@ function MapView({
                 'circle-stroke-color': '#fff',
                 'circle-stroke-width': 1.5,
                 'circle-opacity': 0.95,
+              }}
+            />
+          </Source>
+        )}
+
+        {/* Focos de calor (INPE): ícone de fogo; nos zooms baixos cada ícone é um grupo */}
+        {layers.focos && (
+          <Source
+            key={focosTilesUrl}
+            id="focos"
+            type="vector"
+            tiles={focoTiles}
+            minzoom={0}
+            maxzoom={14}
+          >
+            <Layer
+              id="focos-icon"
+              type="symbol"
+              source-layer="foco"
+              layout={{
+                'icon-image': FIRE_ICON_ID,
+                // Grupo maior = ícone maior (escala logarítmica de n).
+                'icon-size': ['interpolate', ['linear'], ['ln', ['get', 'n']], 0, 0.7, 4.6, 1, 9.2, 1.5] as any,
+                'icon-anchor': 'bottom',
+                'icon-allow-overlap': true,
+                'icon-ignore-placement': true,
+                'symbol-sort-key': ['get', 'n'] as any,
               }}
             />
           </Source>

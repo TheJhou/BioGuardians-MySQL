@@ -39,6 +39,17 @@ export const UC_CATEGORY_COLORS: Record<string, string> = {
   uso_sustentavel: '#2e7d32',    // green
 };
 
+// --- Focos de calor (INPE) no mapa: cores do ícone de fogo ---
+// Fonte única: o ícone desenhado em lib/fireIcon.ts e a legenda do mapa.
+export const FOCO_CALOR_COLORS = {
+  chama: '#ff6d00',    // laranja — corpo da chama
+  miolo: '#ffd54f',    // amarelo — núcleo
+  contorno: '#4e1600', // marrom escuro — contorno, legível sobre o satélite
+};
+
+// Janelas de tempo oferecidas no mapa (dias a partir do foco mais recente).
+export const FOCO_DIAS_OPTIONS = [1, 3, 7, 30];
+
 // --- UC category labels ---
 export const UC_CATEGORY_LABELS: Record<string, string> = {
   protecao_integral: 'Proteção Integral',
