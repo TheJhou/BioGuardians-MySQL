@@ -191,6 +191,11 @@ export const api = {
     return fetchDeduplicated<MonitorEventCollection>(`/monitoramento/eventos${query ? `?${query}` : ''}`);
   },
 
+  // Focos de calor dos últimos `dias` (a partir do foco mais recente), camada "foco".
+  getFocosTilesUrl(params: { dias: number }): string {
+    return `${API_URL}/monitoramento/focos/tiles/{z}/{x}/{y}.mvt?${buildQs({ dias: params.dias })}`;
+  },
+
   async getMonitoramentoEvento(id: number): Promise<MonitorEventDetail> {
     return fetchApi<MonitorEventDetail>(`/monitoramento/eventos/${id}`);
   },

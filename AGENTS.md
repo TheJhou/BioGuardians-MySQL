@@ -111,6 +111,7 @@ docs/           PROJECT_PLAN, DATA_DICTIONARY, ERD, OBSERVABILITY, AREA_TILE_CAC
 - Proxy ML (somente leitura): `GET /api/deteccoes/jobs`, `GET /api/deteccoes/jobs/:id` → `ML_SERVICE_URL` (default `http://localhost:8001`); só funciona com o ML service rodando
 - Cache LRU em memória (`CACHE_TTL_MS`, `CACHE_MAX`) com TTL por rota; sem invalidação ativa (a API não escreve)
 - Monitoramento: `GET /api/monitoramento/resumo` sem filtros lê `monitor_resumo` (recalculada em `finishExecution` ao fim de cada importação, não a cada request). `GET /eventos` conta e pagina até 10.000 eventos (`total_limitado`); acima disso, filtre
+- Focos de calor no mapa: `/api/monitoramento/focos/tiles/:z/:x/:y.mvt?dias=N` (1–30, default 3), camada `foco` (`id`, `n`, `frp`). A janela conta a partir do foco mais recente no banco, não de hoje. Abaixo do z8 os focos são agrupados numa grade (32 células por tile) e `n` > 1; o frontend desenha um ícone de fogo (canvas em `lib/fireIcon.ts`, cores em `FOCO_CALOR_COLORS`) maior conforme `n`, e clicar num grupo aproxima o mapa
 - OpenTelemetry condicional (só ativa com `OTEL_EXPORTER_OTLP_ENDPOINT`)
 - Sem testes automatizados; o CI roda apenas `tsc --noEmit`
 
